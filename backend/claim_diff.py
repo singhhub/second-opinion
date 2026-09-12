@@ -86,6 +86,85 @@ class ClaimState(str, Enum):
     UNCONFIRMED = "UNCONFIRMED"
 
 
+class ActionabilityCategory(int, Enum):
+    """Fixed rubric for ranking CONFLICTING/UNCONFIRMED claims (highest first).
+
+    A fixed, cheap keyword rubric rather than a fresh LLM judgment per
+    claim — per the design doc's flooding-prevention fix: rank, don't
+    filter, so a claim is never dropped, just ordered.
+    """
+
+    DRUG_INTERACTION = 1
+    RISK_OR_RED_FLAG = 2
+    DIAGNOSTIC_SUGGESTION = 3
+    MONITORING_FOLLOWUP = 4
+    BACKGROUND_OR_CAVEAT = 5
+
+
+# Checked in category order; first keyword match wins. A claim matching no
+# keyword defaults to BACKGROUND_OR_CAVEAT (the lowest-priority bucket) —
+# the deliberate fail-safe direction, since under-ranking a real caveat is
+# far cheaper than a genuinely actionable claim never surfacing.
+_ACTIONABILITY_KEYWORDS = {
+    ActionabilityCategory.DRUG_INTERACTION: (
+        "drug interaction",
+        "drug-drug interaction",
+        "contraindicated",
+        "contraindication",
+        "interact with",
+        "interacts with",
+        "dose",
+        "dosage",
+        "overdose",
+    ),
+    ActionabilityCategory.RISK_OR_RED_FLAG: (
+        "red flag",
+        "warning sign",
+        "risk of",
+        "emergency",
+        "urgent",
+        "danger",
+        "life-threatening",
+        "seek immediate",
+    ),
+    ActionabilityCategory.DIAGNOSTIC_SUGGESTION: (
+        "consistent with",
+        "indicative of",
+        "suggestive of",
+        "diagnosis of",
+        "diagnostic",
+        "differential",
+        "rule out",
+    ),
+    ActionabilityCategory.MONITORING_FOLLOWUP: (
+        "monitor",
+        "follow up",
+        "follow-up",
+        "recheck",
+        "re-check",
+        "repeat test",
+        "watch for",
+        "track ",
+    ),
+}
+
+
+def categorize_claim(claim: Claim) -> ActionabilityCategory:
+    text = claim.text.lower()
+    for category, keywords in _ACTIONABILITY_KEYWORDS.items():
+        if any(keyword in text for keyword in keywords):
+            return category
+    return ActionabilityCategory.BACKGROUND_OR_CAVEAT
+
+
+def rank_by_actionability(claims: List[Claim]) -> List[Claim]:
+    """
+    Order claims by actionability category, highest first. Lossless —
+    every input claim appears exactly once in the output, just reordered.
+    """
+    return sorted(claims, key=lambda c: categorize_claim(c).value)
+
+
 def _parse_claims(raw: Optional[Dict[str, Any]]) -> Optional[List[Claim]]:
     if raw is None or not raw.get("content"):
         return None

@@ -299,3 +299,89 @@ async def test_classify_compatibility_sends_both_claim_texts():
     user_content = next(m["content"] for m in sent_messages if m["role"] == "user")
     assert "claim text A" in user_content
     assert "claim text B" in user_content
+
+
+def test_categorize_claim_drug_interaction_is_highest_category():
+    from backend.claim_diff import ActionabilityCategory, categorize_claim
+
+    claim = Claim(
+        text="Drug A + Drug B: contraindicated interaction",
+        claim_type=ClaimType.ASSERTION,
+    )
+    assert categorize_claim(claim) == ActionabilityCategory.DRUG_INTERACTION
+
+
+def test_categorize_claim_red_flag_risk():
+    from backend.claim_diff import ActionabilityCategory, categorize_claim
+
+    claim = Claim(
+        text="Sudden face drooping is a red flag warning sign of stroke",
+        claim_type=ClaimType.ASSERTION,
+    )
+    assert categorize_claim(claim) == ActionabilityCategory.RISK_OR_RED_FLAG
+
+
+def test_categorize_claim_diagnostic_suggestion():
+    from backend.claim_diff import ActionabilityCategory, categorize_claim
+
+    claim = Claim(
+        text="These symptoms are consistent with a diagnosis of TIA",
+        claim_type=ClaimType.ASSERTION,
+    )
+    assert categorize_claim(claim) == ActionabilityCategory.DIAGNOSTIC_SUGGESTION
+
+
+def test_categorize_claim_monitoring_followup():
+    from backend.claim_diff import ActionabilityCategory, categorize_claim
+
+    claim = Claim(
+        text="Monitor blood pressure and follow up in two weeks",
+        claim_type=ClaimType.ASSERTION,
+    )
+    assert categorize_claim(claim) == ActionabilityCategory.MONITORING_FOLLOWUP
+
+
+def test_categorize_claim_ambiguous_defaults_to_lowest_category():
+    from backend.claim_diff import ActionabilityCategory, categorize_claim
+
+    claim = Claim(
+        text="The patient has a long history of well-managed hypertension",
+        claim_type=ClaimType.ASSERTION,
+    )
+    assert categorize_claim(claim) == ActionabilityCategory.BACKGROUND_OR_CAVEAT
+
+
+def test_rank_by_actionability_orders_highest_category_first():
+    background = Claim(
+        text="The patient has a long history of well-managed hypertension",
+        claim_type=ClaimType.ASSERTION,
+    )
+    monitoring = Claim(
+        text="Monitor blood pressure and follow up in two weeks",
+        claim_type=ClaimType.ASSERTION,
+    )
+    interaction = Claim(
+        text="Drug A + Drug B: contraindicated interaction",
+        claim_type=ClaimType.ASSERTION,
+    )
+    red_flag = Claim(
+        text="Sudden face drooping is a red flag warning sign of stroke",
+        claim_type=ClaimType.ASSERTION,
+    )
+
+    ranked = claim_diff.rank_by_actionability([background, monitoring, interaction, red_flag])
+
+    assert ranked == [interaction, red_flag, monitoring, background]
+
+
+def test_rank_by_actionability_is_lossless():
+    claims = [
+        Claim(text="claim one", claim_type=ClaimType.ASSERTION),
+        Claim(text="claim two", claim_type=ClaimType.ASSERTION),
+        Claim(text="Drug A + Drug B: contraindicated interaction", claim_type=ClaimType.ASSERTION),
+    ]
+
+    ranked = claim_diff.rank_by_actionability(claims)
+
+    assert len(ranked) == len(claims)
+    assert set(c.text for c in ranked) == set(c.text for c in claims)
