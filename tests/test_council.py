@@ -240,3 +240,77 @@ async def test_chairman_query_failure_returns_error_response_without_raising():
 
     assert result["model"] == council.CHAIRMAN_MODEL
     assert "response" in result
+
+
+async def test_regression_failed_model_call_never_silently_dropped_or_treated_as_agreement():
+    """
+    [CRITICAL, T12] The mandatory regression test (test plan's Iron Rule).
+
+    Before this fix, stage1_collect_responses did `if response is not
+    None`, so a failed model call vanished entirely - the run would then
+    look like a single, apparently-unanimous response instead of a
+    degraded one. This proves that old bug is actually gone, not just
+    that the new code "looks right": with one of two configured models
+    failing, the failure must stay visible end to end - never invisible,
+    never silently read as agreement.
+    """
+    ok_model, failing_model = COUNCIL_MODELS[0], COUNCIL_MODELS[1]
+    stage1_responses = {ok_model: _fake_response("a real answer"), failing_model: None}
+
+    async def fake_query_models_parallel(models, messages):
+        if messages[0]["content"] == "a question":
+            return stage1_responses
+        return {m: _fake_response("FINAL RANKING:\n1. Response A") for m in models}
+
+    with patch.object(
+        council, "query_models_parallel", new=AsyncMock(side_effect=fake_query_models_parallel)
+    ), patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+    ):
+        stage1_results, stage2_results, stage3_result, metadata = await council.run_full_council(
+            "a question"
+        )
+
+    # 1. The old bug: stage1_results silently shrank to just the survivor.
+    #    It must instead still list both configured models.
+    assert len(stage1_results) == len(COUNCIL_MODELS)
+    assert {r["model"] for r in stage1_results} == set(COUNCIL_MODELS)
+
+    # 2. The failure itself must be explicit, not just "absent".
+    failed_entry = next(r for r in stage1_results if r["model"] == failing_model)
+    assert failed_entry["status"] == "failed"
+    assert failed_entry["response"] is None
+
+    # 3. The run must be flagged degraded and visible - never silently
+    #    unanimous - and the failed model must be named, not just implied.
+    assert metadata["degraded"] is True
+    assert metadata["failed_models"] == [failing_model]
+
+    # 4. The failed model must never appear in the rankings as if it had
+    #    contributed an opinion (no phantom agreement from an empty slot).
+    assert failing_model not in metadata["label_to_model"].values()
+    ranked_models = {entry["model"] for entry in metadata["aggregate_rankings"]}
+    assert failing_model not in ranked_models
+
+
+async def test_regression_stage3_prompt_names_the_failed_model_explicitly():
+    """
+    Companion to the Iron Rule test above: the *prompt sent to the
+    chairman* must explicitly name a failed model as degraded, rather
+    than silently presenting only the survivor's response as if it were
+    the complete picture.
+    """
+    ok_model, failing_model = COUNCIL_MODELS[0], COUNCIL_MODELS[1]
+    stage1_results = [
+        {"model": ok_model, "status": "ok", "response": "a real answer"},
+        {"model": failing_model, "status": "failed", "response": None},
+    ]
+
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+    ) as mock_query:
+        await council.stage3_synthesize_final("a question", stage1_results, [])
+
+    sent_prompt = mock_query.call_args.args[1][0]["content"]
+    assert "DEGRADED" in sent_prompt
+    assert failing_model in sent_prompt
