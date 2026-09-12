@@ -101,6 +101,55 @@ async def test_extract_claims_refusal_or_hedge_type_preserved():
     ]
 
 
+async def test_extract_claims_second_call_same_input_uses_cache(tmp_path):
+    valid_json = json.dumps([{"text": "a claim", "claim_type": "assertion"}])
+    with patch.object(claim_diff.llm_client, "CACHE_DIR", tmp_path), patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response(valid_json)),
+    ) as mock_query:
+        first = await claim_diff.extract_claims("same response text")
+        second = await claim_diff.extract_claims("same response text")
+
+    assert first == second == [Claim(text="a claim", claim_type=ClaimType.ASSERTION)]
+    assert mock_query.await_count == 1
+
+
+async def test_extract_claims_different_input_is_a_cache_miss(tmp_path):
+    valid_json = json.dumps([{"text": "a claim", "claim_type": "assertion"}])
+    with patch.object(claim_diff.llm_client, "CACHE_DIR", tmp_path), patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response(valid_json)),
+    ) as mock_query:
+        await claim_diff.extract_claims("response text one")
+        await claim_diff.extract_claims("response text two")
+
+    assert mock_query.await_count == 2
+
+
+async def test_extract_claims_does_not_cache_fallback_result(tmp_path):
+    valid_json = json.dumps([{"text": "a real claim", "claim_type": "assertion"}])
+    responses = [
+        _fake_response("bad json"),
+        _fake_response("still bad json"),
+        _fake_response(valid_json),
+        _fake_response(valid_json),
+    ]
+    with patch.object(claim_diff.llm_client, "CACHE_DIR", tmp_path), patch.object(
+        claim_diff.llm_client, "query_model", new=AsyncMock(side_effect=responses)
+    ) as mock_query:
+        first = await claim_diff.extract_claims("flaky response text")
+        second = await claim_diff.extract_claims("flaky response text")
+
+    # First call: both attempts fail -> raw-assertion fallback, not cached.
+    assert first == [Claim(text="flaky response text", claim_type=ClaimType.ASSERTION)]
+    # Second call: cache was never populated by the fallback, so it retries
+    # for real and this time succeeds on the first attempt.
+    assert second == [Claim(text="a real claim", claim_type=ClaimType.ASSERTION)]
+    assert mock_query.await_count == 3
+
+
 async def test_align_claims_high_similarity_aligns_without_llm_judge():
     claim_a = Claim(text="drug A and drug B interact", claim_type=ClaimType.ASSERTION)
     claim_b = Claim(text="A and B should not be combined", claim_type=ClaimType.ASSERTION)

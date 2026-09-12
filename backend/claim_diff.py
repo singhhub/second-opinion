@@ -179,6 +179,7 @@ def _parse_claims(raw: Optional[Dict[str, Any]]) -> Optional[List[Claim]]:
 async def extract_claims(
     response_text: str,
     extractor_model: str = DEFAULT_EXTRACTOR_MODEL,
+    use_cache: bool = True,
 ) -> List[Claim]:
     """
     Atomize a model's response text into typed claims via an LLM extractor.
@@ -186,7 +187,19 @@ async def extract_claims(
     Retries once on malformed/unparseable output, then falls back to a
     single raw-assertion claim wrapping the whole response text. Never
     raises and never crashes the caller on extractor failure.
+
+    Cached on disk by (extractor_model, response_text) - avoids re-paying
+    API cost on every eval-tuning iteration. Only a genuinely parsed
+    result is cached; the raw-assertion fallback never is, so a later
+    call still gets a real retry instead of a degraded result stuck
+    forever.
     """
+    key = llm_client.cache_key("extract", extractor_model, response_text)
+    if use_cache:
+        cached = llm_client.cache_read(key)
+        if cached is not None:
+            return [Claim(**c) for c in cached]
+
     for _ in range(2):
         raw = await llm_client.query_model(
             extractor_model,
@@ -197,6 +210,8 @@ async def extract_claims(
         )
         claims = _parse_claims(raw)
         if claims is not None:
+            if use_cache:
+                llm_client.cache_write(key, [c.model_dump() for c in claims])
             return claims
 
     return [Claim(text=response_text, claim_type=ClaimType.ASSERTION)]

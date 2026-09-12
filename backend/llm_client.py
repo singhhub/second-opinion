@@ -7,13 +7,43 @@ proxy — see the design doc's data-hygiene constraint.
 """
 
 import asyncio
+import hashlib
+import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Disk cache for extraction/embedding results, keyed by input+prompt hash -
+# avoids re-paying API cost on every eval-tuning iteration (Finding 8).
+# Lives under data/ so it's covered by the existing data/ gitignore rule.
+CACHE_DIR = Path(os.getenv("LLM_CACHE_DIR", "data/cache"))
+
+
+def cache_key(*parts: str) -> str:
+    return hashlib.sha256("||".join(parts).encode("utf-8")).hexdigest()
+
+
+def cache_read(key: str) -> Optional[Any]:
+    path = CACHE_DIR / f"{key}.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def cache_write(key: str, value: Any) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = CACHE_DIR / f"{key}.json"
+    with open(path, "w") as f:
+        json.dump(value, f)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -130,6 +160,7 @@ async def embed_text(
     text: str,
     model: str = GOOGLE_EMBEDDING_MODEL,
     timeout: float = 60.0,
+    use_cache: bool = True,
 ) -> Optional[List[float]]:
     """
     Embed a piece of text via Google's embedding API.
@@ -138,7 +169,16 @@ async def embed_text(
     already a trusted party since it's also a council model (see design doc
     Constraints). Returns None on failure rather than raising, matching the
     graceful-degradation philosophy of query_model.
+
+    Cached on disk by (model, text) - a failed call is never cached, so a
+    transient failure doesn't permanently stick as a cached None.
     """
+    key = cache_key("embed", model, text)
+    if use_cache:
+        cached = cache_read(key)
+        if cached is not None:
+            return cached
+
     url = f"{GOOGLE_API_URL}/{model}:embedContent"
     payload = {"content": {"parts": [{"text": text}]}}
 
@@ -147,10 +187,14 @@ async def embed_text(
             response = await client.post(url, params={"key": GOOGLE_API_KEY}, json=payload)
             response.raise_for_status()
             data = response.json()
-        return data["embedding"]["values"]
+        values = data["embedding"]["values"]
     except Exception as e:
         print(f"Error embedding text: {e}")
         return None
+
+    if use_cache:
+        cache_write(key, values)
+    return values
 
 
 async def query_models_parallel(

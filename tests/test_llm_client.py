@@ -116,9 +116,9 @@ async def test_query_model_claude_separates_system_message():
     assert sent_payload["messages"] == [{"role": "user", "content": "hi"}]
 
 
-async def test_embed_text_success_returns_vector():
+async def test_embed_text_success_returns_vector(tmp_path):
     fake_response = _mock_response({"embedding": {"values": [0.1, 0.2, 0.3]}})
-    with patch.object(
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
         httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
     ) as mock_post:
         result = await llm_client.embed_text("drug A and drug B interact")
@@ -129,8 +129,8 @@ async def test_embed_text_success_returns_vector():
     assert called_url.endswith(":embedContent")
 
 
-async def test_embed_text_failure_returns_none():
-    with patch.object(
+async def test_embed_text_failure_returns_none(tmp_path):
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
         httpx.AsyncClient,
         "post",
         new=AsyncMock(side_effect=httpx.ConnectTimeout("timed out")),
@@ -138,3 +138,53 @@ async def test_embed_text_failure_returns_none():
         result = await llm_client.embed_text("drug A and drug B interact")
 
     assert result is None
+
+
+async def test_embed_text_second_call_same_text_uses_cache(tmp_path):
+    fake_response = _mock_response({"embedding": {"values": [1.0, 2.0]}})
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        first = await llm_client.embed_text("same text")
+        second = await llm_client.embed_text("same text")
+
+    assert first == second == [1.0, 2.0]
+    assert mock_post.await_count == 1
+
+
+async def test_embed_text_different_text_is_a_cache_miss(tmp_path):
+    fake_response = _mock_response({"embedding": {"values": [1.0, 2.0]}})
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        await llm_client.embed_text("text one")
+        await llm_client.embed_text("text two")
+
+    assert mock_post.await_count == 2
+
+
+async def test_embed_text_does_not_cache_failures(tmp_path):
+    responses = [
+        httpx.ConnectTimeout("timed out"),
+        _mock_response({"embedding": {"values": [3.0, 4.0]}}),
+    ]
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(side_effect=responses)
+    ) as mock_post:
+        first = await llm_client.embed_text("retry me")
+        second = await llm_client.embed_text("retry me")
+
+    assert first is None
+    assert second == [3.0, 4.0]
+    assert mock_post.await_count == 2
+
+
+async def test_embed_text_use_cache_false_bypasses_cache(tmp_path):
+    fake_response = _mock_response({"embedding": {"values": [1.0, 2.0]}})
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        await llm_client.embed_text("same text", use_cache=False)
+        await llm_client.embed_text("same text", use_cache=False)
+
+    assert mock_post.await_count == 2
