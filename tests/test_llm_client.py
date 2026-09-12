@@ -114,3 +114,27 @@ async def test_query_model_claude_separates_system_message():
     sent_payload = mock_post.call_args.kwargs["json"]
     assert sent_payload["system"] == "You are a helpful assistant."
     assert sent_payload["messages"] == [{"role": "user", "content": "hi"}]
+
+
+async def test_embed_text_success_returns_vector():
+    fake_response = _mock_response({"embedding": {"values": [0.1, 0.2, 0.3]}})
+    with patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        result = await llm_client.embed_text("drug A and drug B interact")
+
+    assert result == [0.1, 0.2, 0.3]
+    called_url = mock_post.call_args.args[0]
+    assert called_url.startswith(llm_client.GOOGLE_API_URL)
+    assert called_url.endswith(":embedContent")
+
+
+async def test_embed_text_failure_returns_none():
+    with patch.object(
+        httpx.AsyncClient,
+        "post",
+        new=AsyncMock(side_effect=httpx.ConnectTimeout("timed out")),
+    ):
+        result = await llm_client.embed_text("drug A and drug B interact")
+
+    assert result is None

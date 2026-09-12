@@ -22,6 +22,7 @@ ANTHROPIC_MAX_TOKENS = 4096
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+GOOGLE_EMBEDDING_MODEL = "text-embedding-004"
 
 
 async def _query_claude(
@@ -122,6 +123,33 @@ async def query_model(
         return await handler(model_id, messages, timeout)
     except Exception as e:
         print(f"Error querying model {model}: {e}")
+        return None
+
+
+async def embed_text(
+    text: str,
+    model: str = GOOGLE_EMBEDDING_MODEL,
+    timeout: float = 60.0,
+) -> Optional[List[float]]:
+    """
+    Embed a piece of text via Google's embedding API.
+
+    No local embedding model is available, so embeddings go through Gemini —
+    already a trusted party since it's also a council model (see design doc
+    Constraints). Returns None on failure rather than raising, matching the
+    graceful-degradation philosophy of query_model.
+    """
+    url = f"{GOOGLE_API_URL}/{model}:embedContent"
+    payload = {"content": {"parts": [{"text": text}]}}
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, params={"key": GOOGLE_API_KEY}, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        return data["embedding"]["values"]
+    except Exception as e:
+        print(f"Error embedding text: {e}")
         return None
 
 

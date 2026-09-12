@@ -1,13 +1,16 @@
-"""Tests for claim extraction (backend/claim_diff.py::extract_claims).
+"""Tests for the claim-diff mechanism (backend/claim_diff.py).
 
-Per the design doc's Claim-Diff Mechanism, Step 1 (Extraction): each
-model response is atomized into one subject-predicate claim per fact,
-typed as assertion/recommendation/refusal_or_hedge. Malformed extractor
-output must retry once, then fall back to a single raw-assertion claim
-wrapping the whole response text — never crash.
+Covers Step 1 (Extraction, extract_claims) and Step 2 (Alignment,
+align_claims) of the design doc's Claim-Diff Mechanism. Extraction:
+malformed extractor output must retry once, then fall back to a single
+raw-assertion claim — never crash. Alignment: embedding similarity above
+a threshold means "aboutness," with an LLM judge for borderline pairs;
+at n=2, alignment is greedy best-match — each claim links to at most one
+claim on the other side, or to none.
 """
 
 import json
+import math
 from unittest.mock import AsyncMock, patch
 
 from backend import claim_diff
@@ -16,6 +19,13 @@ from backend.claim_diff import Claim, ClaimType
 
 def _fake_response(content: str):
     return {"content": content, "reasoning_details": None}
+
+
+def _fake_embed(vectors: dict):
+    async def _embed(text, *args, **kwargs):
+        return vectors.get(text)
+
+    return AsyncMock(side_effect=_embed)
 
 
 async def test_extract_claims_parses_valid_json_on_first_try():
@@ -89,3 +99,130 @@ async def test_extract_claims_refusal_or_hedge_type_preserved():
     assert claims == [
         Claim(text="I can't provide medical advice", claim_type=ClaimType.REFUSAL_OR_HEDGE)
     ]
+
+
+async def test_align_claims_high_similarity_aligns_without_llm_judge():
+    claim_a = Claim(text="drug A and drug B interact", claim_type=ClaimType.ASSERTION)
+    claim_b = Claim(text="A and B should not be combined", claim_type=ClaimType.ASSERTION)
+    vectors = {
+        claim_a.text: [1.0, 0.0],
+        claim_b.text: [0.95, math.sqrt(1 - 0.95**2)],
+    }
+
+    with patch.object(claim_diff.llm_client, "embed_text", new=_fake_embed(vectors)), patch.object(
+        claim_diff.llm_client, "query_model", new=AsyncMock()
+    ) as mock_judge:
+        result = await claim_diff.align_claims([claim_a], [claim_b])
+
+    assert mock_judge.await_count == 0
+    assert len(result.aligned) == 1
+    assert result.aligned[0].claim_a == claim_a
+    assert result.aligned[0].claim_b == claim_b
+    assert result.unaligned_a == []
+    assert result.unaligned_b == []
+
+
+async def test_align_claims_low_similarity_leaves_unaligned_without_llm_judge():
+    claim_a = Claim(text="drug A and drug B interact", claim_type=ClaimType.ASSERTION)
+    claim_b = Claim(text="unrelated topic entirely", claim_type=ClaimType.ASSERTION)
+    vectors = {
+        claim_a.text: [1.0, 0.0],
+        claim_b.text: [0.0, 1.0],
+    }
+
+    with patch.object(claim_diff.llm_client, "embed_text", new=_fake_embed(vectors)), patch.object(
+        claim_diff.llm_client, "query_model", new=AsyncMock()
+    ) as mock_judge:
+        result = await claim_diff.align_claims([claim_a], [claim_b])
+
+    assert mock_judge.await_count == 0
+    assert result.aligned == []
+    assert result.unaligned_a == [claim_a]
+    assert result.unaligned_b == [claim_b]
+
+
+async def test_align_claims_borderline_similarity_llm_judge_says_yes_aligns():
+    claim_a = Claim(text="claim A", claim_type=ClaimType.ASSERTION)
+    claim_b = Claim(text="claim B", claim_type=ClaimType.ASSERTION)
+    vectors = {
+        claim_a.text: [1.0, 0.0],
+        claim_b.text: [0.77, math.sqrt(1 - 0.77**2)],
+    }
+
+    with patch.object(claim_diff.llm_client, "embed_text", new=_fake_embed(vectors)), patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response("YES")),
+    ) as mock_judge:
+        result = await claim_diff.align_claims([claim_a], [claim_b])
+
+    assert mock_judge.await_count == 1
+    assert len(result.aligned) == 1
+    assert result.unaligned_a == []
+    assert result.unaligned_b == []
+
+
+async def test_align_claims_borderline_similarity_llm_judge_says_no_stays_unaligned():
+    claim_a = Claim(text="claim A", claim_type=ClaimType.ASSERTION)
+    claim_b = Claim(text="claim B", claim_type=ClaimType.ASSERTION)
+    vectors = {
+        claim_a.text: [1.0, 0.0],
+        claim_b.text: [0.77, math.sqrt(1 - 0.77**2)],
+    }
+
+    with patch.object(claim_diff.llm_client, "embed_text", new=_fake_embed(vectors)), patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response("NO")),
+    ) as mock_judge:
+        result = await claim_diff.align_claims([claim_a], [claim_b])
+
+    assert mock_judge.await_count == 1
+    assert result.aligned == []
+    assert result.unaligned_a == [claim_a]
+    assert result.unaligned_b == [claim_b]
+
+
+async def test_align_claims_embedding_failure_resolves_to_unaligned_never_crashes():
+    claim_a = Claim(text="claim A", claim_type=ClaimType.ASSERTION)
+    claim_b = Claim(text="claim B", claim_type=ClaimType.ASSERTION)
+
+    with patch.object(claim_diff.llm_client, "embed_text", new=_fake_embed({})):
+        result = await claim_diff.align_claims([claim_a], [claim_b])
+
+    assert result.aligned == []
+    assert result.unaligned_a == [claim_a]
+    assert result.unaligned_b == [claim_b]
+
+
+async def test_align_claims_greedy_best_match_prevents_double_matching():
+    a1 = Claim(text="a1", claim_type=ClaimType.ASSERTION)
+    a2 = Claim(text="a2", claim_type=ClaimType.ASSERTION)
+    b1 = Claim(text="b1", claim_type=ClaimType.ASSERTION)
+    vectors = {
+        "a1": [1.0, 0.0],
+        "a2": [1.0, 0.5],
+        "b1": [1.0, 0.0],
+    }
+
+    with patch.object(claim_diff.llm_client, "embed_text", new=_fake_embed(vectors)), patch.object(
+        claim_diff.llm_client, "query_model", new=AsyncMock()
+    ) as mock_judge:
+        result = await claim_diff.align_claims([a1, a2], [b1])
+
+    assert mock_judge.await_count == 0
+    assert len(result.aligned) == 1
+    assert result.aligned[0].claim_a == a1
+    assert result.aligned[0].claim_b == b1
+    assert result.unaligned_a == [a2]
+    assert result.unaligned_b == []
+
+
+async def test_align_claims_empty_input_returns_empty_result():
+    claim_a = Claim(text="claim A", claim_type=ClaimType.ASSERTION)
+
+    result = await claim_diff.align_claims([claim_a], [])
+
+    assert result.aligned == []
+    assert result.unaligned_a == [claim_a]
+    assert result.unaligned_b == []
