@@ -11,6 +11,7 @@ must never treat a failed model as silent agreement.
 from unittest.mock import AsyncMock, patch
 
 from backend import council
+from backend.claim_diff import Claim, ClaimPair, ClaimState, ClaimType
 from backend.config import COUNCIL_MODELS
 
 
@@ -117,3 +118,125 @@ async def test_run_full_council_not_degraded_when_all_models_succeed():
 
     assert metadata["degraded"] is False
     assert metadata["failed_models"] == []
+
+
+def test_build_ranked_diff_items_merges_and_ranks_by_actionability():
+    background_pair = ClaimPair(
+        claim_a=Claim(text="patient has a long history of hypertension", claim_type=ClaimType.ASSERTION),
+        claim_b=Claim(text="patient has managed hypertension for years", claim_type=ClaimType.ASSERTION),
+    )
+    drug_interaction_claim = Claim(
+        text="Drug A + Drug B: contraindicated interaction", claim_type=ClaimType.ASSERTION
+    )
+
+    items = council.build_ranked_diff_items(
+        conflicting=[background_pair],
+        unconfirmed_a=[drug_interaction_claim],
+        unconfirmed_b=[],
+    )
+
+    assert len(items) == 2
+    assert items[0]["state"] == ClaimState.UNCONFIRMED
+    assert items[0]["claim"] == drug_interaction_claim
+    assert items[1]["state"] == ClaimState.CONFLICTING
+
+
+def test_build_ranked_diff_items_is_lossless():
+    pair = ClaimPair(
+        claim_a=Claim(text="claim a", claim_type=ClaimType.ASSERTION),
+        claim_b=Claim(text="claim b", claim_type=ClaimType.ASSERTION),
+    )
+    unconfirmed_a = [Claim(text="only A said this", claim_type=ClaimType.ASSERTION)]
+    unconfirmed_b = [
+        Claim(text="only B said this", claim_type=ClaimType.ASSERTION),
+        Claim(text="and this too", claim_type=ClaimType.ASSERTION),
+    ]
+
+    items = council.build_ranked_diff_items([pair], unconfirmed_a, unconfirmed_b)
+
+    assert len(items) == 1 + len(unconfirmed_a) + len(unconfirmed_b)
+
+
+async def test_chairman_prompt_includes_never_emergency_rule():
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+    ) as mock_query:
+        await council.synthesize_claim_diff_chairman("is this an emergency?", [], [])
+
+    sent_prompt = mock_query.call_args.args[1][0]["content"]
+    assert "NEVER" in sent_prompt
+    assert "emergency" in sent_prompt.lower()
+
+
+async def test_chairman_empty_agreed_section_says_so_explicitly():
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+    ) as mock_query:
+        await council.synthesize_claim_diff_chairman("a question", [], [])
+
+    sent_prompt = mock_query.call_args.args[1][0]["content"]
+    assert "No agreed findings" in sent_prompt
+
+
+async def test_chairman_empty_diff_section_says_so_explicitly():
+    agreed_pair = ClaimPair(
+        claim_a=Claim(text="shared finding", claim_type=ClaimType.ASSERTION),
+        claim_b=Claim(text="shared finding", claim_type=ClaimType.ASSERTION),
+    )
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+    ) as mock_query:
+        await council.synthesize_claim_diff_chairman("a question", [agreed_pair], [])
+
+    sent_prompt = mock_query.call_args.args[1][0]["content"]
+    assert "No conflicting or unconfirmed claims" in sent_prompt
+
+
+async def test_chairman_prompt_never_leaks_real_model_names():
+    agreed_pair = ClaimPair(
+        claim_a=Claim(text="shared finding", claim_type=ClaimType.ASSERTION),
+        claim_b=Claim(text="shared finding", claim_type=ClaimType.ASSERTION),
+    )
+    items = council.build_ranked_diff_items(
+        conflicting=[],
+        unconfirmed_a=[Claim(text="drug interaction finding", claim_type=ClaimType.ASSERTION)],
+        unconfirmed_b=[],
+    )
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+    ) as mock_query:
+        await council.synthesize_claim_diff_chairman("a question", [agreed_pair], items)
+
+    sent_prompt = mock_query.call_args.args[1][0]["content"]
+    for real_model in COUNCIL_MODELS:
+        assert real_model not in sent_prompt
+    assert "Model A" in sent_prompt or "Model B" in sent_prompt
+
+
+async def test_chairman_diff_section_includes_conflicting_and_unconfirmed_text():
+    pair = ClaimPair(
+        claim_a=Claim(text="claude claim text", claim_type=ClaimType.ASSERTION),
+        claim_b=Claim(text="gemini claim text", claim_type=ClaimType.ASSERTION),
+    )
+    items = council.build_ranked_diff_items(
+        conflicting=[pair],
+        unconfirmed_a=[Claim(text="unconfirmed claim text", claim_type=ClaimType.ASSERTION)],
+        unconfirmed_b=[],
+    )
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+    ) as mock_query:
+        await council.synthesize_claim_diff_chairman("a question", [], items)
+
+    sent_prompt = mock_query.call_args.args[1][0]["content"]
+    assert "claude claim text" in sent_prompt
+    assert "gemini claim text" in sent_prompt
+    assert "unconfirmed claim text" in sent_prompt
+
+
+async def test_chairman_query_failure_returns_error_response_without_raising():
+    with patch.object(council, "query_model", new=AsyncMock(return_value=None)):
+        result = await council.synthesize_claim_diff_chairman("a question", [], [])
+
+    assert result["model"] == council.CHAIRMAN_MODEL
+    assert "response" in result

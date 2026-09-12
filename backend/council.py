@@ -3,6 +3,15 @@
 from typing import List, Dict, Any, Tuple
 from .omniroute import query_models_parallel, query_model
 from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
+from .claim_diff import Claim, ClaimPair, ClaimState, categorize_claim
+
+CHAIRMAN_NEVER_EMERGENCY_RULE = (
+    "You must NEVER state or imply whether this is or is not a medical "
+    "emergency, and must NEVER tell the user to go to the ER or that it's "
+    "safe not to - that call belongs to the user and their doctor, not you. "
+    "You may name specific observations, symptoms, or red flags worth "
+    "checking - never the verdict itself."
+)
 
 
 async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
@@ -377,3 +386,130 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
     }
 
     return stage1_results, stage2_results, stage3_result, metadata
+
+
+def build_ranked_diff_items(
+    conflicting: List[ClaimPair],
+    unconfirmed_a: List[Claim],
+    unconfirmed_b: List[Claim],
+) -> List[Dict[str, Any]]:
+    """
+    Merge CONFLICTING pairs and UNCONFIRMED claims (from both sides) into
+    one list, ranked together by actionability category.
+
+    The design doc's flooding-prevention fix ranks CONFLICTING and
+    UNCONFIRMED together in one section, not each state separately -
+    otherwise a lower-category conflict could still outrank a
+    high-category unconfirmed finding like a drug interaction. Lossless:
+    every input claim/pair appears exactly once in the output.
+    """
+    items: List[Dict[str, Any]] = []
+
+    for pair in conflicting:
+        items.append({
+            "state": ClaimState.CONFLICTING,
+            "category": categorize_claim(pair.claim_a),
+            "claim_a": pair.claim_a,
+            "claim_b": pair.claim_b,
+        })
+
+    for claim in unconfirmed_a:
+        items.append({
+            "state": ClaimState.UNCONFIRMED,
+            "category": categorize_claim(claim),
+            "side": "A",
+            "claim": claim,
+        })
+
+    for claim in unconfirmed_b:
+        items.append({
+            "state": ClaimState.UNCONFIRMED,
+            "category": categorize_claim(claim),
+            "side": "B",
+            "claim": claim,
+        })
+
+    items.sort(key=lambda item: item["category"].value)
+    return items
+
+
+def _format_agreed_section(agreed: List[ClaimPair]) -> str:
+    if not agreed:
+        return "No agreed findings - the two models did not converge on any claim."
+    return "\n".join(f"- {pair.claim_a.text}" for pair in agreed)
+
+
+def _format_diff_section(items: List[Dict[str, Any]]) -> str:
+    if not items:
+        return "No conflicting or unconfirmed claims - the two models fully agreed."
+
+    lines = []
+    for item in items:
+        if item["state"] == ClaimState.CONFLICTING:
+            lines.append(
+                f'- CONFLICTING: Model A says "{item["claim_a"].text}"; '
+                f'Model B says "{item["claim_b"].text}"'
+            )
+        else:
+            lines.append(f'- UNCONFIRMED (Model {item["side"]} only): {item["claim"].text}')
+    return "\n".join(lines)
+
+
+async def synthesize_claim_diff_chairman(
+    user_query: str,
+    agreed: List[ClaimPair],
+    ranked_diff_items: List[Dict[str, Any]],
+    chairman_model: str = CHAIRMAN_MODEL,
+) -> Dict[str, Any]:
+    """
+    Chairman synthesis for the claim-diff mechanism (validation phase).
+
+    Three sections, mapped to the design doc's actual primitive: (1)
+    agreed findings, (2) conflicting/unconfirmed claims ranked by
+    actionability plus the specific observation that would help resolve
+    which is right, (3) open questions for the doctor. The chairman
+    organizes and explains the mechanically-computed diff; it does not
+    re-decide what counts as a conflict.
+
+    Model identity stays anonymized as "Model A"/"Model B" even to the
+    chairman itself, which is a council member and a claim source here -
+    the same self-preference mitigation stage 2 already applies via
+    label_to_model, reused in spirit for this claim-level diff. Hard
+    rule: never an emergency verdict, in either direction. Each section
+    says so explicitly when empty rather than rendering blank.
+    """
+    agreed_text = _format_agreed_section(agreed)
+    diff_text = _format_diff_section(ranked_diff_items)
+
+    chairman_prompt = f"""{CHAIRMAN_NEVER_EMERGENCY_RULE}
+
+You are organizing a disagreement-preserving summary for two family caregivers who already saw two AI models' anonymized answers to their question about a family member's care.
+
+Original Question: {user_query}
+
+AGREED FINDINGS (both models agree):
+{agreed_text}
+
+CONFLICTING / UNCONFIRMED CLAIMS (ranked by actionability, most important first):
+{diff_text}
+
+Write exactly three sections:
+1. Agreed Findings: summarize what both models agree on.
+2. Conflicting / Unconfirmed Claims: for each item above, explain the disagreement or gap in plain language, and name the SPECIFIC observation, symptom, or check that would help distinguish which claim is right - not which one to believe, but what to go look at.
+3. Questions for the Doctor: a short list of questions the caregivers should bring to the next appointment, based on the above.
+
+If a section has no content, say so explicitly in that section - never leave it blank. Do not add a fourth section or an overall recommendation."""
+
+    messages = [{"role": "user", "content": chairman_prompt}]
+    response = await query_model(chairman_model, messages)
+
+    if response is None:
+        return {
+            "model": chairman_model,
+            "response": "Error: Unable to generate the claim-diff synthesis."
+        }
+
+    return {
+        "model": chairman_model,
+        "response": response.get("content", "")
+    }
