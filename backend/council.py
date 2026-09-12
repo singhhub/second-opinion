@@ -9,24 +9,39 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
     """
     Stage 1: Collect individual responses from all council models.
 
+    Returns one entry per *configured* model (COUNCIL_MODELS), not only
+    successes — a failed call must stay visible downstream with an
+    explicit status, never silently vanish (see design doc's Degraded-run
+    safety rule: the old `if response is not None` filter is the exact
+    error-path-to-false-unanimity that rule exists to prevent).
+
     Args:
         user_query: The user's question
 
     Returns:
-        List of dicts with 'model' and 'response' keys
+        List of dicts with 'model', 'status' ('ok'/'failed'), and
+        'response' (None if failed) keys.
     """
     messages = [{"role": "user", "content": user_query}]
 
     # Query all models in parallel
     responses = await query_models_parallel(COUNCIL_MODELS, messages)
 
-    # Format results
+    # Format results - one entry per configured model, always
     stage1_results = []
-    for model, response in responses.items():
-        if response is not None:  # Only include successful responses
+    for model in COUNCIL_MODELS:
+        response = responses.get(model)
+        if response is not None:
             stage1_results.append({
                 "model": model,
+                "status": "ok",
                 "response": response.get('content', '')
+            })
+        else:
+            stage1_results.append({
+                "model": model,
+                "status": "failed",
+                "response": None
             })
 
     return stage1_results
@@ -46,19 +61,27 @@ async def stage2_collect_rankings(
     Returns:
         Tuple of (rankings list, label_to_model mapping)
     """
+    # Only rank models that actually responded - a failed call has no
+    # content to anonymize or evaluate, and must not be silently treated
+    # as agreement by including it as an empty/placeholder response.
+    ok_results = [r for r in stage1_results if r.get("status") == "ok"]
+
+    if not ok_results:
+        return [], {}
+
     # Create anonymized labels for responses (Response A, Response B, etc.)
-    labels = [chr(65 + i) for i in range(len(stage1_results))]  # A, B, C, ...
+    labels = [chr(65 + i) for i in range(len(ok_results))]  # A, B, C, ...
 
     # Create mapping from label to model name
     label_to_model = {
         f"Response {label}": result['model']
-        for label, result in zip(labels, stage1_results)
+        for label, result in zip(labels, ok_results)
     }
 
     # Build the ranking prompt
     responses_text = "\n\n".join([
         f"Response {label}:\n{result['response']}"
-        for label, result in zip(labels, stage1_results)
+        for label, result in zip(labels, ok_results)
     ])
 
     ranking_prompt = f"""You are evaluating different responses to the following question:
@@ -129,10 +152,18 @@ async def stage3_synthesize_final(
         Dict with 'model' and 'response' keys
     """
     # Build comprehensive context for chairman
+    ok_results = [r for r in stage1_results if r.get("status") == "ok"]
+    failed_models = [r["model"] for r in stage1_results if r.get("status") == "failed"]
+
     stage1_text = "\n\n".join([
         f"Model: {result['model']}\nResponse: {result['response']}"
-        for result in stage1_results
+        for result in ok_results
     ])
+    if failed_models:
+        stage1_text += (
+            "\n\n[DEGRADED RUN] The following models failed to respond and are "
+            f"NOT reflected above: {', '.join(failed_models)}"
+        )
 
     stage2_text = "\n\n".join([
         f"Model: {result['model']}\nRanking: {result['ranking']}"
@@ -303,15 +334,24 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
     Returns:
         Tuple of (stage1_results, stage2_results, stage3_result, metadata)
     """
-    # Stage 1: Collect individual responses
+    # Stage 1: Collect individual responses (one entry per configured model,
+    # including failed ones - see stage1_collect_responses)
     stage1_results = await stage1_collect_responses(user_query)
 
+    ok_results = [r for r in stage1_results if r["status"] == "ok"]
+    failed_models = [r["model"] for r in stage1_results if r["status"] == "failed"]
+
     # If no models responded successfully, return error
-    if not stage1_results:
-        return [], [], {
+    if not ok_results:
+        return stage1_results, [], {
             "model": "error",
             "response": "All models failed to respond. Please try again."
-        }, {}
+        }, {
+            "label_to_model": {},
+            "aggregate_rankings": [],
+            "degraded": True,
+            "failed_models": failed_models,
+        }
 
     # Stage 2: Collect rankings
     stage2_results, label_to_model = await stage2_collect_rankings(user_query, stage1_results)
@@ -326,10 +366,14 @@ async def run_full_council(user_query: str) -> Tuple[List, List, Dict, Dict]:
         stage2_results
     )
 
-    # Prepare metadata
+    # Prepare metadata - a run is degraded if any configured model failed,
+    # and this must stay visible, never silently reported as if every
+    # model agreed (see design doc's Degraded-run safety rule).
     metadata = {
         "label_to_model": label_to_model,
-        "aggregate_rankings": aggregate_rankings
+        "aggregate_rankings": aggregate_rankings,
+        "degraded": len(failed_models) > 0,
+        "failed_models": failed_models,
     }
 
     return stage1_results, stage2_results, stage3_result, metadata
