@@ -5,22 +5,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# OpenRouter API key
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# OmniRoute API key (from http://localhost:20128/dashboard/api-manager)
+OMNIROUTE_API_KEY = os.getenv("OMNIROUTE_API_KEY")
 
-# Council members - list of OpenRouter model identifiers
+# Council members - model identifiers as exposed by your OmniRoute instance
+# (see http://localhost:20128/dashboard or GET /v1/models for what's available)
 COUNCIL_MODELS = [
-    "openai/gpt-5.1",
-    "google/gemini-3-pro-preview",
-    "anthropic/claude-sonnet-4.5",
-    "x-ai/grok-4",
+    # "openai/gpt-5.1",
+    "gemini/gemini-3.1-pro-preview",
+    "claude/claude-sonnet-4-5-20250929",
+    # "x-ai/grok-4",
 ]
 
 # Chairman model - synthesizes final response
-CHAIRMAN_MODEL = "google/gemini-3-pro-preview"
+CHAIRMAN_MODEL = "gemini/gemini-3.1-pro-preview"
 
-# OpenRouter API endpoint
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+# OmniRoute API endpoint (local instance)
+OMNIROUTE_API_URL = os.getenv("OMNIROUTE_API_URL", "http://localhost:20128/v1/chat/completions")
 
 # Data directory for conversation storage
 DATA_DIR = "data/conversations"

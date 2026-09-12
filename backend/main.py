@@ -14,6 +14,14 @@ from .council import run_full_council, generate_conversation_title, stage1_colle
 
 app = FastAPI(title="LLM Council API")
 
+
+def validate_conversation_id(conversation_id: str) -> None:
+    """Reject anything that isn't a well-formed UUID before it touches the filesystem."""
+    try:
+        uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid conversation ID")
+
 # Enable CORS for local development
 app.add_middleware(
     CORSMiddleware,
@@ -73,6 +81,7 @@ async def create_conversation(request: CreateConversationRequest):
 @app.get("/api/conversations/{conversation_id}", response_model=Conversation)
 async def get_conversation(conversation_id: str):
     """Get a specific conversation with all its messages."""
+    validate_conversation_id(conversation_id)
     conversation = storage.get_conversation(conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -85,6 +94,7 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
     Send a message and run the 3-stage council process.
     Returns the complete response with all stages.
     """
+    validate_conversation_id(conversation_id)
     # Check if conversation exists
     conversation = storage.get_conversation(conversation_id)
     if conversation is None:
@@ -129,6 +139,7 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
     Send a message and stream the 3-stage council process.
     Returns Server-Sent Events as each stage completes.
     """
+    validate_conversation_id(conversation_id)
     # Check if conversation exists
     conversation = storage.get_conversation(conversation_id)
     if conversation is None:
@@ -196,4 +207,4 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="127.0.0.1", port=8001)

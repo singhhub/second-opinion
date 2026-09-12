@@ -1,0 +1,373 @@
+<title>Two Embeddings, One Pattern</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --bg: #eef1f5;
+    --surface: #ffffff;
+    --surface-2: #f7f9fb;
+    --text: #1a1e27;
+    --text-muted: #5c6675;
+    --border: #d7dce3;
+    --accent-a: #c23a72;      /* dating app */
+    --accent-a-soft: #f4dce8;
+    --accent-b: #157f70;      /* medical rag */
+    --accent-b-soft: #d9ece8;
+    --accent-shared: #414a5a; /* shared infra */
+    --accent-shared-soft: #e4e7ec;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12141a;
+      --surface: #1a1d24;
+      --surface-2: #20242c;
+      --text: #e6e9ee;
+      --text-muted: #97a1b0;
+      --border: #2b303a;
+      --accent-a: #ff7fb0;
+      --accent-a-soft: #3a2230;
+      --accent-b: #34cdb3;
+      --accent-b-soft: #17332e;
+      --accent-shared: #9aa4b8;
+      --accent-shared-soft: #262b34;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #12141a;
+    --surface: #1a1d24;
+    --surface-2: #20242c;
+    --text: #e6e9ee;
+    --text-muted: #97a1b0;
+    --border: #2b303a;
+    --accent-a: #ff7fb0;
+    --accent-a-soft: #3a2230;
+    --accent-b: #34cdb3;
+    --accent-b-soft: #17332e;
+    --accent-shared: #9aa4b8;
+    --accent-shared-soft: #262b34;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Public Sans", -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.55;
+    margin: 0;
+    padding: 48px 24px 80px;
+  }
+
+  main {
+    max-width: 980px;
+    margin: 0 auto;
+  }
+
+  .eyebrow {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 700;
+    font-size: clamp(28px, 4vw, 38px);
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0 0 18px;
+  }
+
+  .intro {
+    max-width: 66ch;
+    font-size: 17px;
+    color: var(--text);
+  }
+
+  .intro strong.a { color: var(--accent-a); font-weight: 600; }
+  .intro strong.b { color: var(--accent-b); font-weight: 600; }
+
+  .diagram-wrap {
+    margin: 44px 0 12px;
+    overflow-x: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 12px;
+  }
+
+  figure { margin: 0; }
+
+  svg { display: block; margin: 0 auto; max-width: 100%; height: auto; color: var(--text); }
+
+  figcaption {
+    font-size: 13px;
+    color: var(--text-muted);
+    text-align: center;
+    margin-top: 14px;
+    max-width: 60ch;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  /* --- SVG element classes --- */
+  .col-label-a { fill: var(--accent-a); }
+  .col-label-b { fill: var(--accent-b); }
+
+  .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+  .box-a { stroke: var(--accent-a); }
+  .box-b { stroke: var(--accent-b); }
+  .box-shared { fill: var(--surface-2); stroke: var(--accent-shared); stroke-width: 1.5; stroke-dasharray: 4 3; }
+
+  .box-eyebrow { font-family: "JetBrains Mono", monospace; font-size: 10.5px; letter-spacing: 0.06em; }
+  .box-eyebrow-a { fill: var(--accent-a); }
+  .box-eyebrow-b { fill: var(--accent-b); }
+  .box-eyebrow-shared { fill: var(--accent-shared); }
+
+  .box-text { font-family: "JetBrains Mono", monospace; font-size: 12px; fill: var(--text); }
+  .box-text-muted { font-family: "JetBrains Mono", monospace; font-size: 12px; fill: var(--text-muted); }
+
+  .spine-num { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 16px; fill: var(--text-muted); }
+  .spine-label { font-family: "JetBrains Mono", monospace; font-size: 9.5px; letter-spacing: 0.05em; fill: var(--text-muted); }
+
+  .gutter-mark { font-family: "JetBrains Mono", monospace; font-size: 10.5px; letter-spacing: 0.05em; fill: var(--accent-shared); }
+
+  .flow-line { stroke: var(--text-muted); stroke-width: 1.5; fill: none; }
+  .arrowhead { fill: var(--text-muted); }
+
+  /* --- Takeaways --- */
+  .takeaways {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-top: 40px;
+  }
+
+  @media (max-width: 720px) {
+    .takeaways { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 22px 24px;
+  }
+
+  .card h2 {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 14px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    margin: 0 0 14px;
+  }
+
+  .card.shared h2 { color: var(--accent-shared); }
+  .card.reshaped h2 { color: var(--accent-b); }
+
+  .card ul { margin: 0; padding-left: 20px; }
+  .card li { margin-bottom: 10px; font-size: 14.5px; }
+  .card li:last-child { margin-bottom: 0; }
+  .card code {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px;
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  .note {
+    margin-top: 28px;
+    padding: 16px 20px;
+    border-left: 3px solid var(--accent-b);
+    background: var(--accent-b-soft);
+    border-radius: 0 6px 6px 0;
+    font-size: 14.5px;
+  }
+</style>
+
+<main>
+  <p class="eyebrow">Architecture comparison</p>
+  <h1>Two Embeddings, One Pattern</h1>
+  <p class="intro">
+    The <strong class="a">Dating App</strong>'s pgvector setup and the
+    <strong class="b">medical RAG pipeline</strong> we're planning for LLM
+    Council share the exact same embedding call and index — that part gets
+    copied, not reinvented. What changes is the shape of the data around it:
+    one embedding per person versus many embeddings per document, and what
+    happens to the result once it's retrieved.
+  </p>
+
+  <div class="diagram-wrap">
+    <figure>
+      <svg viewBox="0 0 1020 920" role="img" aria-label="Pipeline comparison: on the left, the Dating App embeds one profile per user, stores it as a single vector column, and returns a ranked match list filtered by a similarity floor. On the right, LLM Council's medical RAG embeds many chunks per document, stores them in a separate table keyed by patient, and feeds retrieved chunks into the existing three-stage council instead of a similarity floor. Both sides share the identical Gemini embedding call and HNSW index step in the middle.">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="arrowhead"></path>
+          </marker>
+        </defs>
+
+        <!-- column headers -->
+        <text x="280" y="26" text-anchor="middle" class="box-eyebrow col-label-a" font-size="13">DATING APP &#183; user &#8596; user matching</text>
+        <text x="810" y="26" text-anchor="middle" class="box-eyebrow col-label-b" font-size="13">LLM COUNCIL &#183; document RAG</text>
+
+        <!-- spine: row 1 -->
+        <text x="45" y="91" text-anchor="middle" class="spine-num">1</text>
+        <text x="45" y="106" text-anchor="middle" class="spine-label">SOURCE</text>
+
+        <!-- Row 1 boxes -->
+        <rect x="95" y="55" width="370" height="80" rx="6" class="box box-a"></rect>
+        <text x="113" y="76" class="box-eyebrow box-eyebrow-a">PER USER</text>
+        <text x="113" y="95" class="box-text">users.bio, interests, profile_data</text>
+        <text x="113" y="112" class="box-text">(JSONB: personality, lifestyle&#8230;)</text>
+        <text x="113" y="129" class="box-text">+ clarity_summary &#8594; buildProfileText()</text>
+
+        <rect x="625" y="55" width="370" height="80" rx="6" class="box box-b"></rect>
+        <text x="643" y="76" class="box-eyebrow box-eyebrow-b">PER DOCUMENT CHUNK</text>
+        <text x="643" y="95" class="box-text">Extracted text (PyMuPDF, or vision-LLM</text>
+        <text x="643" y="112" class="box-text">for scans/images) &#8594; split into chunks,</text>
+        <text x="643" y="129" class="box-text">~500&#8211;800 tokens, ~15% overlap</text>
+
+        <line x1="280" y1="135" x2="280" y2="167" class="flow-line" marker-end="url(#arrow)"></line>
+        <line x1="810" y1="135" x2="810" y2="167" class="flow-line" marker-end="url(#arrow)"></line>
+
+        <!-- spine: row 2 shared -->
+        <text x="45" y="196" text-anchor="middle" class="spine-num">2</text>
+        <text x="45" y="211" text-anchor="middle" class="spine-label">EMBED</text>
+
+        <rect x="95" y="170" width="900" height="65" rx="6" class="box box-shared"></rect>
+        <text x="510" y="190" text-anchor="middle" class="box-eyebrow box-eyebrow-shared">SHARED MECHANISM &#8212; IDENTICAL ON BOTH SIDES</text>
+        <text x="510" y="208" text-anchor="middle" class="box-text">Gemini embedContent &#183; gemini-embedding-001 &#183; taskType: SEMANTIC_SIMILARITY</text>
+        <text x="510" y="224" text-anchor="middle" class="box-text">outputDimensionality: 768</text>
+
+        <line x1="280" y1="235" x2="280" y2="267" class="flow-line" marker-end="url(#arrow)"></line>
+        <line x1="810" y1="235" x2="810" y2="267" class="flow-line" marker-end="url(#arrow)"></line>
+
+        <!-- spine: row 3 -->
+        <text x="45" y="318" text-anchor="middle" class="spine-num">3</text>
+        <text x="45" y="333" text-anchor="middle" class="spine-label">STORAGE</text>
+
+        <!-- Row 3 boxes -->
+        <rect x="95" y="270" width="370" height="110" rx="6" class="box box-a"></rect>
+        <text x="113" y="291" class="box-eyebrow box-eyebrow-a">1 EMBEDDING PER PERSON</text>
+        <text x="113" y="310" class="box-text">users.profile_embedding vector(768)</text>
+        <text x="113" y="327" class="box-text">one row = one dater</text>
+        <text x="113" y="344" class="box-text">gate: embedding_source_hash</text>
+        <text x="113" y="361" class="box-text">(MD5 &#8212; skip API call if unchanged)</text>
+
+        <rect x="625" y="270" width="370" height="110" rx="6" class="box box-b"></rect>
+        <text x="643" y="291" class="box-eyebrow box-eyebrow-b">N EMBEDDINGS PER PATIENT</text>
+        <text x="643" y="310" class="box-text">document_chunks(patient_id,</text>
+        <text x="643" y="327" class="box-text">document_id, chunk_text,</text>
+        <text x="643" y="344" class="box-text">embedding vector(768))</text>
+        <text x="643" y="361" class="box-text">same hash-gate idea, per chunk</text>
+
+        <text x="545" y="330" text-anchor="middle" class="gutter-mark">&#8596;</text>
+        <text x="545" y="345" text-anchor="middle" class="gutter-mark">DIFFERS</text>
+
+        <line x1="280" y1="380" x2="280" y2="412" class="flow-line" marker-end="url(#arrow)"></line>
+        <line x1="810" y1="380" x2="810" y2="412" class="flow-line" marker-end="url(#arrow)"></line>
+
+        <!-- spine: row 4 shared -->
+        <text x="45" y="446" text-anchor="middle" class="spine-num">4</text>
+        <text x="45" y="461" text-anchor="middle" class="spine-label">INDEX</text>
+
+        <rect x="95" y="415" width="900" height="55" rx="6" class="box box-shared"></rect>
+        <text x="510" y="434" text-anchor="middle" class="box-eyebrow box-eyebrow-shared">SHARED MECHANISM &#8212; IDENTICAL ON BOTH SIDES</text>
+        <text x="510" y="452" text-anchor="middle" class="box-text">CREATE INDEX &#8230; USING hnsw (embedding vector_cosine_ops) WITH (m=16, ef_construction=64)</text>
+
+        <line x1="280" y1="470" x2="280" y2="502" class="flow-line" marker-end="url(#arrow)"></line>
+        <line x1="810" y1="470" x2="810" y2="502" class="flow-line" marker-end="url(#arrow)"></line>
+
+        <!-- spine: row 5 -->
+        <text x="45" y="533" text-anchor="middle" class="spine-num">5</text>
+        <text x="45" y="548" text-anchor="middle" class="spine-label">TRIGGER</text>
+
+        <rect x="95" y="505" width="370" height="70" rx="6" class="box box-a"></rect>
+        <text x="113" y="533" class="box-text">User opens the Matches tab</text>
+        <text x="113" y="551" class="box-text">&#8594; getRankedMatches(user)</text>
+
+        <rect x="625" y="505" width="370" height="70" rx="6" class="box box-b"></rect>
+        <text x="643" y="533" class="box-text">Caregiver asks about Patient X</text>
+        <text x="643" y="551" class="box-text">&#8594; embed the question (same API)</text>
+
+        <line x1="280" y1="575" x2="280" y2="607" class="flow-line" marker-end="url(#arrow)"></line>
+        <line x1="810" y1="575" x2="810" y2="607" class="flow-line" marker-end="url(#arrow)"></line>
+
+        <!-- spine: row 6 -->
+        <text x="45" y="678" text-anchor="middle" class="spine-num">6</text>
+        <text x="45" y="693" text-anchor="middle" class="spine-label">QUERY</text>
+
+        <rect x="95" y="610" width="370" height="130" rx="6" class="box box-a"></rect>
+        <text x="113" y="631" class="box-eyebrow box-eyebrow-a">SIMILARITY FLOOR</text>
+        <text x="113" y="650" class="box-text">WHERE gender/age/zip filters</text>
+        <text x="113" y="667" class="box-text">AND 1-(embedding&lt;=&gt;$1) &gt;= 0.75</text>
+        <text x="113" y="684" class="box-text">ORDER BY embedding &lt;=&gt; $1 ASC</text>
+        <text x="113" y="701" class="box-text">LIMIT 10</text>
+        <text x="113" y="720" class="box-text-muted">bad matches excluded entirely</text>
+
+        <rect x="625" y="610" width="370" height="130" rx="6" class="box box-b"></rect>
+        <text x="643" y="631" class="box-eyebrow box-eyebrow-b">NO FLOOR &#8212; ALWAYS RETRIEVE</text>
+        <text x="643" y="650" class="box-text">WHERE patient_id = $1</text>
+        <text x="643" y="667" class="box-text">ORDER BY embedding &lt;=&gt; $2 ASC</text>
+        <text x="643" y="684" class="box-text">LIMIT 8</text>
+        <text x="643" y="701" class="box-text-muted">top-K only, no similarity cutoff</text>
+        <text x="643" y="718" class="box-text-muted">best available beats no context</text>
+
+        <text x="545" y="668" text-anchor="middle" class="gutter-mark">&#8596;</text>
+        <text x="545" y="683" text-anchor="middle" class="gutter-mark">DIFFERS</text>
+
+        <line x1="280" y1="740" x2="280" y2="772" class="flow-line" marker-end="url(#arrow)"></line>
+        <line x1="810" y1="740" x2="810" y2="772" class="flow-line" marker-end="url(#arrow)"></line>
+
+        <!-- spine: row 7 -->
+        <text x="45" y="833" text-anchor="middle" class="spine-num">7</text>
+        <text x="45" y="848" text-anchor="middle" class="spine-label">RESULT</text>
+
+        <rect x="95" y="775" width="370" height="110" rx="6" class="box box-a"></rect>
+        <text x="113" y="805" class="box-text">Ranked candidate list</text>
+        <text x="113" y="823" class="box-text">&#8594; shown directly to the user</text>
+
+        <rect x="625" y="775" width="370" height="110" rx="6" class="box box-b"></rect>
+        <text x="643" y="805" class="box-text">Retrieved chunks &#8594; Stage 1 prompt</text>
+        <text x="643" y="822" class="box-text">(Claude + Gemini) &#8594; Stage 2 peer rank</text>
+        <text x="643" y="839" class="box-text">&#8594; Stage 3 chairman synthesis &#8594;</text>
+        <text x="643" y="856" class="box-text">answer shown to caregiver/doctor</text>
+      </svg>
+      <figcaption>
+        Both pipelines run the identical Gemini embedding call and HNSW index (dashed boxes, spanning both columns). Everything else — how the source text is shaped, how it's stored, how the query is filtered, and what happens to the result — is redrawn for retrieval instead of matching.
+      </figcaption>
+    </figure>
+  </div>
+
+  <div class="takeaways">
+    <div class="card shared">
+      <h2>Carries over unchanged</h2>
+      <ul>
+        <li>Postgres + <code>pgvector</code>, same <code>&lt;=&gt;</code> cosine operator</li>
+        <li>Same embedding call: Gemini <code>embedContent</code>, <code>gemini-embedding-001</code>, 768 dimensions</li>
+        <li>Same HNSW index shape and tuning (<code>m=16, ef_construction=64</code>)</li>
+        <li>Same lazy re-embedding guard &#8212; hash the source text, skip the API call when nothing changed</li>
+      </ul>
+    </div>
+    <div class="card reshaped">
+      <h2>Reshaped for retrieval</h2>
+      <ul>
+        <li>One row per person &#8594; a separate table, many chunks per document, keyed by patient</li>
+        <li>A 0.75 similarity floor that can legitimately return zero matches &#8594; no floor, always return the best-available top-K</li>
+        <li>Ranked list shown straight to the user &#8594; chunks feed your existing 3-stage council before anything reaches a caregiver</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="note">
+    The floor removal in row 6 is the one decision worth pausing on: a dating match with weak similarity should be hidden, but a medical question with only a weak-similarity record still deserves the model's best attempt at an answer &#8212; silence isn't a safer failure mode here. Retrieval always returns its top-K; if nothing is truly relevant, that's a judgment for the chairman synthesis to surface, not for the SQL layer to hide.
+  </p>
+</main>

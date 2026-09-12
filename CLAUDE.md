@@ -11,16 +11,19 @@ LLM Council is a 3-stage deliberation system where multiple LLMs collaboratively
 ### Backend Structure (`backend/`)
 
 **`config.py`**
-- Contains `COUNCIL_MODELS` (list of OpenRouter model identifiers)
+- Contains `COUNCIL_MODELS` (list of model identifiers as exposed by OmniRoute)
 - Contains `CHAIRMAN_MODEL` (model that synthesizes final answer)
-- Uses environment variable `OPENROUTER_API_KEY` from `.env`
+- Uses environment variable `OMNIROUTE_API_KEY` from `.env`
+- `OMNIROUTE_API_URL` defaults to `http://localhost:20128/v1/chat/completions`, overridable via env var
 - Backend runs on **port 8001** (NOT 8000 - user had another app on 8000)
 
-**`openrouter.py`**
+**`omniroute.py`** (formerly `openrouter.py`)
+- Client for the local [OmniRoute](https://github.com/diegosouzapw/OmniRoute) instance — an OpenAI-compatible proxy/router that itself connects to upstream providers (OpenAI, Anthropic, Google, etc.) configured via its own dashboard at `http://localhost:20128/dashboard`
 - `query_model()`: Single async model query
 - `query_models_parallel()`: Parallel queries using `asyncio.gather()`
 - Returns dict with 'content' and optional 'reasoning_details'
 - Graceful degradation: returns None on failure, continues with successful responses
+- Model identifiers in `COUNCIL_MODELS`/`CHAIRMAN_MODEL` must match whatever OmniRoute exposes for your connected providers — check the dashboard or `GET /v1/models`
 
 **`council.py`** - The Core Logic
 - `stage1_collect_responses()`: Parallel queries to all council models
