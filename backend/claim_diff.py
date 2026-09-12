@@ -33,6 +33,8 @@ ALIGNMENT_LOW_THRESHOLD = 0.70
 
 ALIGNMENT_JUDGE_SYSTEM_PROMPT = """You judge whether two medical claims are about the same specific topic — aboutness only, not whether they agree or disagree. "Drug A+B is contraindicated" and "Drug A+B is safe together" ARE about the same topic (they disagree, but that's a separate question). Respond with exactly one word: YES or NO."""
 
+COMPATIBILITY_SYSTEM_PROMPT = """You classify whether two aligned medical claims are compatible (agree) or incompatible (conflict). "Aboutness" has already been established — both claims are about the same topic. Judge only whether they assert the same thing or contradict each other. Respond with exactly one word: COMPATIBLE or INCOMPATIBLE."""
+
 EXTRACTION_SYSTEM_PROMPT = """You extract atomized claims from a medical assistant's response.
 
 Break the response into one subject-predicate claim per fact or \
@@ -74,6 +76,14 @@ class AlignmentResult(BaseModel):
     aligned: List[ClaimPair]
     unaligned_a: List[Claim]
     unaligned_b: List[Claim]
+
+
+class ClaimState(str, Enum):
+    """Output states of the Claim-Diff Mechanism (three, matching n=2)."""
+
+    AGREED = "AGREED"
+    CONFLICTING = "CONFLICTING"
+    UNCONFIRMED = "UNCONFIRMED"
 
 
 def _parse_claims(raw: Optional[Dict[str, Any]]) -> Optional[List[Claim]]:
@@ -198,3 +208,33 @@ async def align_claims(
     unaligned_b = [c for idx, c in enumerate(claims_b) if idx not in matched_b]
 
     return AlignmentResult(aligned=aligned, unaligned_a=unaligned_a, unaligned_b=unaligned_b)
+
+
+async def classify_compatibility(
+    pair: ClaimPair,
+    judge_model: str = DEFAULT_EXTRACTOR_MODEL,
+) -> ClaimState:
+    """
+    Classify an aligned claim pair as AGREED or CONFLICTING (Step 3).
+
+    "Aboutness" (alignment) does not imply compatibility — near-identical
+    embeddings can be opposite in meaning (e.g. "contraindicated" vs.
+    "safe together"). Fail-safe default: any response other than exactly
+    "COMPATIBLE" — an ambiguous judgment, malformed output, or a failed
+    call — resolves to CONFLICTING, never AGREED.
+    """
+    raw = await llm_client.query_model(
+        judge_model,
+        [
+            {"role": "system", "content": COMPATIBILITY_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"Claim A: {pair.claim_a.text}\nClaim B: {pair.claim_b.text}",
+            },
+        ],
+    )
+
+    if raw is not None and raw.get("content", "").strip().upper() == "COMPATIBLE":
+        return ClaimState.AGREED
+
+    return ClaimState.CONFLICTING

@@ -226,3 +226,76 @@ async def test_align_claims_empty_input_returns_empty_result():
     assert result.aligned == []
     assert result.unaligned_a == [claim_a]
     assert result.unaligned_b == []
+
+
+def _pair(text_a="drug A+B is contraindicated", text_b="drug A+B is safe together"):
+    from backend.claim_diff import ClaimPair
+
+    return ClaimPair(
+        claim_a=Claim(text=text_a, claim_type=ClaimType.ASSERTION),
+        claim_b=Claim(text=text_b, claim_type=ClaimType.ASSERTION),
+    )
+
+
+async def test_classify_compatibility_compatible_returns_agreed():
+    from backend.claim_diff import ClaimState
+
+    with patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response("COMPATIBLE")),
+    ):
+        result = await claim_diff.classify_compatibility(_pair())
+
+    assert result == ClaimState.AGREED
+
+
+async def test_classify_compatibility_incompatible_returns_conflicting():
+    from backend.claim_diff import ClaimState
+
+    with patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response("INCOMPATIBLE")),
+    ):
+        result = await claim_diff.classify_compatibility(_pair())
+
+    assert result == ClaimState.CONFLICTING
+
+
+async def test_classify_compatibility_ambiguous_response_defaults_to_conflicting():
+    from backend.claim_diff import ClaimState
+
+    with patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response("unclear, could go either way")),
+    ):
+        result = await claim_diff.classify_compatibility(_pair())
+
+    assert result == ClaimState.CONFLICTING
+
+
+async def test_classify_compatibility_query_failure_defaults_to_conflicting():
+    from backend.claim_diff import ClaimState
+
+    with patch.object(
+        claim_diff.llm_client, "query_model", new=AsyncMock(return_value=None)
+    ):
+        result = await claim_diff.classify_compatibility(_pair())
+
+    assert result == ClaimState.CONFLICTING
+
+
+async def test_classify_compatibility_sends_both_claim_texts():
+    with patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response("COMPATIBLE")),
+    ) as mock_query:
+        await claim_diff.classify_compatibility(_pair("claim text A", "claim text B"))
+
+    sent_messages = mock_query.call_args.args[1]
+    user_content = next(m["content"] for m in sent_messages if m["role"] == "user")
+    assert "claim text A" in user_content
+    assert "claim text B" in user_content
