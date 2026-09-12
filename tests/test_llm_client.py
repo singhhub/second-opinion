@@ -188,3 +188,142 @@ async def test_embed_text_use_cache_false_bypasses_cache(tmp_path):
         await llm_client.embed_text("same text", use_cache=False)
 
     assert mock_post.await_count == 2
+
+
+async def test_query_model_gemini_separates_system_message():
+    fake_response = _mock_response(
+        {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        await llm_client.query_model(
+            "gemini/gemini-3.1-pro-preview",
+            [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+    sent_payload = mock_post.call_args.kwargs["json"]
+    assert sent_payload["systemInstruction"] == {
+        "parts": [{"text": "You are a helpful assistant."}]
+    }
+    assert sent_payload["contents"] == [{"role": "user", "parts": [{"text": "hi"}]}]
+
+
+async def test_query_model_gemini_maps_assistant_role_to_model():
+    fake_response = _mock_response(
+        {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        await llm_client.query_model(
+            "gemini/gemini-3.1-pro-preview",
+            [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "prior answer"},
+            ],
+        )
+
+    sent_contents = mock_post.call_args.kwargs["json"]["contents"]
+    roles = [c["role"] for c in sent_contents]
+    assert roles == ["user", "model"]
+
+
+async def test_query_model_claude_no_system_message_omits_system_key():
+    fake_response = _mock_response({"content": [{"type": "text", "text": "ok"}]})
+    with patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        await llm_client.query_model(
+            "claude/claude-sonnet-4-5-20250929",
+            [{"role": "user", "content": "hi"}],
+        )
+
+    sent_payload = mock_post.call_args.kwargs["json"]
+    assert "system" not in sent_payload
+
+
+async def test_query_model_http_error_status_returns_none():
+    error_response = MagicMock(spec=httpx.Response)
+    error_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "server error", request=MagicMock(), response=error_response
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=error_response)
+    ):
+        result = await llm_client.query_model(
+            "claude/claude-sonnet-4-5-20250929",
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert result is None
+
+
+async def test_query_model_claude_concatenates_multiple_text_blocks():
+    fake_response = _mock_response(
+        {
+            "content": [
+                {"type": "text", "text": "first part. "},
+                {"type": "text", "text": "second part."},
+            ]
+        }
+    )
+    with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)):
+        result = await llm_client.query_model(
+            "claude/claude-sonnet-4-5-20250929",
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert result["content"] == "first part. second part."
+
+
+async def test_query_model_gemini_concatenates_multiple_parts():
+    fake_response = _mock_response(
+        {"candidates": [{"content": {"parts": [{"text": "first. "}, {"text": "second."}]}}]}
+    )
+    with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)):
+        result = await llm_client.query_model(
+            "gemini/gemini-3.1-pro-preview",
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert result["content"] == "first. second."
+
+
+async def test_query_models_parallel_mixed_success_and_failure():
+    async def fake_post(url, **kwargs):
+        if url == llm_client.ANTHROPIC_API_URL:
+            raise httpx.ConnectTimeout("timed out")
+        return _mock_response({"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
+
+    with patch.object(httpx.AsyncClient, "post", new=AsyncMock(side_effect=fake_post)):
+        result = await llm_client.query_models_parallel(
+            ["claude/claude-sonnet-4-5-20250929", "gemini/gemini-3.1-pro-preview"],
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert result["claude/claude-sonnet-4-5-20250929"] is None
+    assert result["gemini/gemini-3.1-pro-preview"]["content"] == "ok"
+
+
+async def test_embed_text_custom_model_used_in_url_and_cache_key(tmp_path):
+    fake_response = _mock_response({"embedding": {"values": [9.0]}})
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        await llm_client.embed_text("some text", model="custom-embedding-model")
+
+    called_url = mock_post.call_args.args[0]
+    assert called_url == f"{llm_client.GOOGLE_API_URL}/custom-embedding-model:embedContent"
+
+    # A different model for the same text must be a cache miss, not
+    # accidentally share the default model's cache entry.
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post_again:
+        await llm_client.embed_text("some text")
+
+    assert mock_post_again.await_count == 1

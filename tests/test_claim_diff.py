@@ -434,3 +434,111 @@ def test_rank_by_actionability_is_lossless():
 
     assert len(ranked) == len(claims)
     assert set(c.text for c in ranked) == set(c.text for c in claims)
+
+
+def test_rank_by_actionability_stable_sort_preserves_order_within_category():
+    first = Claim(text="claim one background", claim_type=ClaimType.ASSERTION)
+    second = Claim(text="claim two background", claim_type=ClaimType.ASSERTION)
+    third = Claim(text="claim three background", claim_type=ClaimType.ASSERTION)
+
+    ranked = claim_diff.rank_by_actionability([first, second, third])
+
+    assert ranked == [first, second, third]
+
+
+def test_categorize_claim_is_case_insensitive():
+    from backend.claim_diff import ActionabilityCategory, categorize_claim
+
+    claim = Claim(
+        text="DRUG A + DRUG B: CONTRAINDICATED INTERACTION",
+        claim_type=ClaimType.ASSERTION,
+    )
+    assert categorize_claim(claim) == ActionabilityCategory.DRUG_INTERACTION
+
+
+async def test_extract_claims_valid_json_invalid_schema_retries_then_falls_back():
+    # Valid JSON syntax, but claim_type isn't one of the enum values -
+    # a schema violation (ValidationError), distinct from a JSON syntax
+    # error, must hit the same retry-then-fallback path.
+    bad_schema_json = json.dumps([{"text": "a claim", "claim_type": "not_a_real_type"}])
+    with patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response(bad_schema_json)),
+    ) as mock_query:
+        claims = await claim_diff.extract_claims("some response text")
+
+    assert mock_query.await_count == 2
+    assert claims == [Claim(text="some response text", claim_type=ClaimType.ASSERTION)]
+
+
+async def test_extract_claims_json_object_instead_of_array_falls_back():
+    # Valid JSON, but a single object rather than a list of claims.
+    not_a_list_json = json.dumps({"text": "a claim", "claim_type": "assertion"})
+    with patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response(not_a_list_json)),
+    ) as mock_query:
+        claims = await claim_diff.extract_claims("some response text")
+
+    assert mock_query.await_count == 2
+    assert claims == [Claim(text="some response text", claim_type=ClaimType.ASSERTION)]
+
+
+async def test_align_claims_judge_response_case_and_whitespace_insensitive():
+    claim_a = Claim(text="claim A", claim_type=ClaimType.ASSERTION)
+    claim_b = Claim(text="claim B", claim_type=ClaimType.ASSERTION)
+    vectors = {
+        claim_a.text: [1.0, 0.0],
+        claim_b.text: [0.77, math.sqrt(1 - 0.77**2)],
+    }
+
+    with patch.object(claim_diff.llm_client, "embed_text", new=_fake_embed(vectors)), patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response("  yes\n")),
+    ):
+        result = await claim_diff.align_claims([claim_a], [claim_b])
+
+    assert len(result.aligned) == 1
+
+
+async def test_align_claims_two_by_two_pairs_each_claim_with_its_own_best_match():
+    a1 = Claim(text="a1", claim_type=ClaimType.ASSERTION)
+    a2 = Claim(text="a2", claim_type=ClaimType.ASSERTION)
+    b1 = Claim(text="b1", claim_type=ClaimType.ASSERTION)
+    b2 = Claim(text="b2", claim_type=ClaimType.ASSERTION)
+    # a1<->b1 and a2<->b2 are the true pairs; cross-pairs are dissimilar.
+    vectors = {
+        "a1": [1.0, 0.0],
+        "b1": [0.98, math.sqrt(1 - 0.98**2)],
+        "a2": [0.0, 1.0],
+        "b2": [math.sqrt(1 - 0.98**2), 0.98],
+    }
+
+    with patch.object(claim_diff.llm_client, "embed_text", new=_fake_embed(vectors)), patch.object(
+        claim_diff.llm_client, "query_model", new=AsyncMock()
+    ) as mock_judge:
+        result = await claim_diff.align_claims([a1, a2], [b1, b2])
+
+    assert mock_judge.await_count == 0
+    paired = sorted(
+        ((pair.claim_a.text, pair.claim_b.text) for pair in result.aligned)
+    )
+    assert paired == [("a1", "b1"), ("a2", "b2")]
+    assert result.unaligned_a == []
+    assert result.unaligned_b == []
+
+
+async def test_classify_compatibility_response_case_and_whitespace_insensitive():
+    from backend.claim_diff import ClaimState
+
+    with patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response("  compatible\n")),
+    ):
+        result = await claim_diff.classify_compatibility(_pair())
+
+    assert result == ClaimState.AGREED
