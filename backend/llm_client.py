@@ -32,7 +32,15 @@ def _log(label: str, **fields: Any) -> None:
     if not VERBOSE:
         return
     parts = "  ".join(f"{k}={v!r}" for k, v in fields.items())
-    print(f"[llm_client] {label}  {parts}")
+    message = f"[llm_client] {label}  {parts}"
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        # Dynamic content (a real model response, a prompt) can contain
+        # characters the console's codec can't render (hit this exact
+        # crash on Windows' cp1252 console with a plain arrow character).
+        # Never let a logging line crash the actual request it's describing.
+        print(message.encode("ascii", "replace").decode("ascii"))
 
 
 def cache_key(*parts: str) -> str:
@@ -88,21 +96,21 @@ async def _post_json(
 ) -> Dict[str, Any]:
     last_error: Exception = RuntimeError("unreachable")
     for attempt in range(MAX_RETRIES + 1):
-        _log("→ POST", url=url, attempt=f"{attempt + 1}/{MAX_RETRIES + 1}", payload_preview=str(json_payload)[:400])
+        _log("-> POST", url=url, attempt=f"{attempt + 1}/{MAX_RETRIES + 1}", payload_preview=str(json_payload)[:400])
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, headers=headers, params=params, json=json_payload)
                 response.raise_for_status()
                 data = response.json()
-                _log("← 200", url=url, attempt=attempt + 1, body_preview=str(data)[:400])
+                _log("<- 200", url=url, attempt=attempt + 1, body_preview=str(data)[:400])
                 return data
         except httpx.HTTPStatusError as e:
-            _log("← HTTP ERROR", url=url, attempt=attempt + 1, status=e.response.status_code, body=e.response.text[:400])
+            _log("<- HTTP ERROR", url=url, attempt=attempt + 1, status=e.response.status_code, body=e.response.text[:400])
             if e.response.status_code not in _RETRYABLE_STATUS_CODES or attempt == MAX_RETRIES:
                 raise
             last_error = e
         except httpx.TransportError as e:
-            _log("← TRANSPORT ERROR", url=url, attempt=attempt + 1, error=f"{type(e).__name__}: {e}")
+            _log("<- TRANSPORT ERROR", url=url, attempt=attempt + 1, error=f"{type(e).__name__}: {e}")
             if attempt == MAX_RETRIES:
                 raise
             last_error = e

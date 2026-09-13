@@ -43,7 +43,7 @@ def format_report(report: Dict[str, Any]) -> str:
     total = report["total_cases"]
     lines = [
         f"Eval cases: {total}",
-        f"Retained — new mechanism: {report['new_mechanism_retained_count']}/{total}"
+        f"Retained -- new mechanism: {report['new_mechanism_retained_count']}/{total}"
         f"   control: {report['control_retained_count']}/{total}",
         "",
     ]
