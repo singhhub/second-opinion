@@ -52,7 +52,43 @@ ANTHROPIC_MAX_TOKENS = 4096
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-GOOGLE_EMBEDDING_MODEL = "text-embedding-004"
+GOOGLE_EMBEDDING_MODEL = "gemini-embedding-001"
+
+# Real-world observation, not theoretical: a live eval run saw intermittent
+# "all connection attempts failed" errors that vanished on a single isolated
+# retry, with no other symptom. A short retry-with-backoff for transient
+# failures - never for a deterministic 4xx like bad auth or a bad request,
+# where retrying just wastes another call for the same answer.
+MAX_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 0.5
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+async def _post_json(
+    url: str,
+    *,
+    json_payload: Dict[str, Any],
+    timeout: float,
+    headers: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    last_error: Exception = RuntimeError("unreachable")
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(url, headers=headers, params=params, json=json_payload)
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code not in _RETRYABLE_STATUS_CODES or attempt == MAX_RETRIES:
+                raise
+            last_error = e
+        except httpx.TransportError as e:
+            if attempt == MAX_RETRIES:
+                raise
+            last_error = e
+        await asyncio.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+    raise last_error
 
 
 async def _query_claude(
@@ -75,10 +111,7 @@ async def _query_claude(
         "content-type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(ANTHROPIC_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
+    data = await _post_json(ANTHROPIC_API_URL, json_payload=payload, timeout=timeout, headers=headers)
 
     text = "".join(
         block.get("text", "")
@@ -109,10 +142,7 @@ async def _query_gemini(
 
     url = f"{GOOGLE_API_URL}/{model}:generateContent"
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(url, params={"key": GOOGLE_API_KEY}, json=payload)
-        response.raise_for_status()
-        data = response.json()
+    data = await _post_json(url, json_payload=payload, timeout=timeout, params={"key": GOOGLE_API_KEY})
 
     parts = data["candidates"][0]["content"]["parts"]
     text = "".join(part.get("text", "") for part in parts)
@@ -183,10 +213,7 @@ async def embed_text(
     payload = {"content": {"parts": [{"text": text}]}}
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, params={"key": GOOGLE_API_KEY}, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        data = await _post_json(url, json_payload=payload, timeout=timeout, params={"key": GOOGLE_API_KEY})
         values = data["embedding"]["values"]
     except Exception as e:
         print(f"Error embedding text: {e}")

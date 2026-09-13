@@ -62,7 +62,7 @@ async def test_query_model_unknown_provider_returns_none():
 
 
 async def test_query_model_network_error_returns_none():
-    with patch.object(
+    with patch.object(llm_client, "RETRY_BACKOFF_SECONDS", 0), patch.object(
         httpx.AsyncClient,
         "post",
         new=AsyncMock(side_effect=httpx.ConnectTimeout("timed out")),
@@ -73,6 +73,89 @@ async def test_query_model_network_error_returns_none():
         )
 
     assert result is None
+
+
+async def test_query_model_retries_transient_connection_error_then_succeeds():
+    fake_response = _mock_response({"content": [{"type": "text", "text": "ok"}]})
+    with patch.object(llm_client, "RETRY_BACKOFF_SECONDS", 0), patch.object(
+        httpx.AsyncClient,
+        "post",
+        new=AsyncMock(side_effect=[httpx.ConnectError("all connection attempts failed"), fake_response]),
+    ) as mock_post:
+        result = await llm_client.query_model(
+            "claude/claude-sonnet-4-5-20250929",
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert result == {"content": "ok", "reasoning_details": None}
+    assert mock_post.await_count == 2
+
+
+async def test_query_model_retries_503_then_succeeds():
+    error_response = MagicMock(spec=httpx.Response)
+    error_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "service unavailable", request=MagicMock(), response=MagicMock(status_code=503)
+    )
+    fake_response = _mock_response({"content": [{"type": "text", "text": "ok"}]})
+    with patch.object(llm_client, "RETRY_BACKOFF_SECONDS", 0), patch.object(
+        httpx.AsyncClient,
+        "post",
+        new=AsyncMock(side_effect=[error_response, fake_response]),
+    ) as mock_post:
+        result = await llm_client.query_model(
+            "claude/claude-sonnet-4-5-20250929",
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert result == {"content": "ok", "reasoning_details": None}
+    assert mock_post.await_count == 2
+
+
+async def test_query_model_does_not_retry_a_400_bad_request():
+    error_response = MagicMock(spec=httpx.Response)
+    error_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "bad request", request=MagicMock(), response=MagicMock(status_code=400)
+    )
+    with patch.object(llm_client, "RETRY_BACKOFF_SECONDS", 0), patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=error_response)
+    ) as mock_post:
+        result = await llm_client.query_model(
+            "claude/claude-sonnet-4-5-20250929",
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert result is None
+    assert mock_post.await_count == 1
+
+
+async def test_query_model_gives_up_after_max_retries():
+    with patch.object(llm_client, "RETRY_BACKOFF_SECONDS", 0), patch.object(
+        httpx.AsyncClient,
+        "post",
+        new=AsyncMock(side_effect=httpx.ConnectError("all connection attempts failed")),
+    ) as mock_post:
+        result = await llm_client.query_model(
+            "claude/claude-sonnet-4-5-20250929",
+            [{"role": "user", "content": "hi"}],
+        )
+
+    assert result is None
+    assert mock_post.await_count == llm_client.MAX_RETRIES + 1
+
+
+async def test_embed_text_retries_transient_connection_error_then_succeeds(tmp_path):
+    fake_response = _mock_response({"embedding": {"values": [1.0, 2.0]}})
+    with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
+        llm_client, "RETRY_BACKOFF_SECONDS", 0
+    ), patch.object(
+        httpx.AsyncClient,
+        "post",
+        new=AsyncMock(side_effect=[httpx.ConnectError("all connection attempts failed"), fake_response]),
+    ) as mock_post:
+        result = await llm_client.embed_text("some text")
+
+    assert result == [1.0, 2.0]
+    assert mock_post.await_count == 2
 
 
 async def test_query_models_parallel_maps_models_to_responses():
@@ -164,19 +247,21 @@ async def test_embed_text_different_text_is_a_cache_miss(tmp_path):
 
 
 async def test_embed_text_does_not_cache_failures(tmp_path):
-    responses = [
-        httpx.ConnectTimeout("timed out"),
-        _mock_response({"embedding": {"values": [3.0, 4.0]}}),
+    # First call exhausts every retry attempt (all transient failures) and
+    # must give up with None; second call is a fresh attempt that succeeds -
+    # a failure that exhausted retries must still not poison the cache.
+    responses = [httpx.ConnectTimeout("timed out")] * (llm_client.MAX_RETRIES + 1) + [
+        _mock_response({"embedding": {"values": [3.0, 4.0]}})
     ]
     with patch.object(llm_client, "CACHE_DIR", tmp_path), patch.object(
-        httpx.AsyncClient, "post", new=AsyncMock(side_effect=responses)
-    ) as mock_post:
+        llm_client, "RETRY_BACKOFF_SECONDS", 0
+    ), patch.object(httpx.AsyncClient, "post", new=AsyncMock(side_effect=responses)) as mock_post:
         first = await llm_client.embed_text("retry me")
         second = await llm_client.embed_text("retry me")
 
     assert first is None
     assert second == [3.0, 4.0]
-    assert mock_post.await_count == 2
+    assert mock_post.await_count == llm_client.MAX_RETRIES + 1 + 1
 
 
 async def test_embed_text_use_cache_false_bypasses_cache(tmp_path):
