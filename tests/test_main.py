@@ -77,3 +77,11 @@ def test_analyze_requires_a_question_field():
     response = client.post("/api/second-opinion/analyze", json={})
 
     assert response.status_code == 422
+
+
+def test_ui_route_serves_html_file():
+    response = client.get("/ui")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert b"Second Opinion" in response.content
