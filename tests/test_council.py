@@ -8,6 +8,7 @@ model with an explicit ok/failed status, and stage2/stage3/run_full_council
 must never treat a failed model as silent agreement.
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 from backend import council
@@ -157,39 +158,58 @@ def test_build_ranked_diff_items_is_lossless():
     assert len(items) == 1 + len(unconfirmed_a) + len(unconfirmed_b)
 
 
-async def test_chairman_prompt_includes_never_emergency_rule():
+async def test_chairman_system_prompt_includes_never_emergency_rule():
     with patch.object(
-        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+        council, "query_model", new=AsyncMock(return_value=_fake_response('{"agreed_findings": "", "disagreement_summary": "", "observations": [], "questions_for_doctor": []}'))
     ) as mock_query:
         await council.synthesize_claim_diff_chairman("is this an emergency?", [], [])
 
-    sent_prompt = mock_query.call_args.args[1][0]["content"]
-    assert "NEVER" in sent_prompt
-    assert "emergency" in sent_prompt.lower()
+    sent_system_prompt = mock_query.call_args.args[1][0]["content"]
+    assert "NEVER" in sent_system_prompt
+    assert "emergency" in sent_system_prompt.lower()
 
 
-async def test_chairman_empty_agreed_section_says_so_explicitly():
+async def test_chairman_valid_json_parses_into_structured_summary():
+    valid_json = json.dumps({
+        "agreed_findings": "both models agree on X",
+        "disagreement_summary": "they disagree on Y",
+        "observations": [{"label": "check this", "items": ["do a", "do b"]}],
+        "questions_for_doctor": ["ask the doctor this"],
+    })
     with patch.object(
-        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+        council, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
     ) as mock_query:
-        await council.synthesize_claim_diff_chairman("a question", [], [])
+        result = await council.synthesize_claim_diff_chairman("a question", [], [])
 
-    sent_prompt = mock_query.call_args.args[1][0]["content"]
-    assert "No agreed findings" in sent_prompt
+    assert mock_query.await_count == 1
+    assert result["structured"].agreed_findings == "both models agree on X"
+    assert result["structured"].observations[0].label == "check this"
+    assert "ask the doctor this" in result["response"]
 
 
-async def test_chairman_empty_diff_section_says_so_explicitly():
-    agreed_pair = ClaimPair(
-        claim_a=Claim(text="shared finding", claim_type=ClaimType.ASSERTION),
-        claim_b=Claim(text="shared finding", claim_type=ClaimType.ASSERTION),
-    )
+async def test_chairman_malformed_json_retries_then_falls_back_safely():
+    valid_json = json.dumps({
+        "agreed_findings": "", "disagreement_summary": "", "observations": [], "questions_for_doctor": [],
+    })
+    responses = [_fake_response("not valid json"), _fake_response(valid_json)]
     with patch.object(
-        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+        council, "query_model", new=AsyncMock(side_effect=responses)
     ) as mock_query:
-        await council.synthesize_claim_diff_chairman("a question", [agreed_pair], [])
+        result = await council.synthesize_claim_diff_chairman("a question", [], [])
 
-    sent_prompt = mock_query.call_args.args[1][0]["content"]
-    assert "No conflicting or unconfirmed claims" in sent_prompt
+    assert mock_query.await_count == 2
+    assert result["structured"].agreed_findings == ""
+
+
+async def test_chairman_permanently_malformed_json_falls_back_without_raising():
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response("still not json"))
+    ) as mock_query:
+        result = await council.synthesize_claim_diff_chairman("a question", [], [])
+
+    assert mock_query.await_count == 2
+    assert result["structured"].agreed_findings == ""
+    assert isinstance(result["response"], str)
 
 
 async def test_chairman_prompt_never_leaks_real_model_names():
@@ -202,15 +222,20 @@ async def test_chairman_prompt_never_leaks_real_model_names():
         unconfirmed_a=[Claim(text="drug interaction finding", claim_type=ClaimType.ASSERTION)],
         unconfirmed_b=[],
     )
+    valid_json = json.dumps({
+        "agreed_findings": "", "disagreement_summary": "", "observations": [], "questions_for_doctor": [],
+    })
     with patch.object(
-        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+        council, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
     ) as mock_query:
         await council.synthesize_claim_diff_chairman("a question", [agreed_pair], items)
 
-    sent_prompt = mock_query.call_args.args[1][0]["content"]
+    system_prompt = mock_query.call_args.args[1][0]["content"]
+    user_message = mock_query.call_args.args[1][1]["content"]
     for real_model in COUNCIL_MODELS:
-        assert real_model not in sent_prompt
-    assert "Model A" in sent_prompt or "Model B" in sent_prompt
+        assert real_model not in system_prompt
+        assert real_model not in user_message
+    assert "Model A" in user_message or "Model B" in user_message
 
 
 async def test_chairman_diff_section_includes_conflicting_and_unconfirmed_text():
@@ -223,23 +248,28 @@ async def test_chairman_diff_section_includes_conflicting_and_unconfirmed_text()
         unconfirmed_a=[Claim(text="unconfirmed claim text", claim_type=ClaimType.ASSERTION)],
         unconfirmed_b=[],
     )
+    valid_json = json.dumps({
+        "agreed_findings": "", "disagreement_summary": "", "observations": [], "questions_for_doctor": [],
+    })
     with patch.object(
-        council, "query_model", new=AsyncMock(return_value=_fake_response("synthesis"))
+        council, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
     ) as mock_query:
         await council.synthesize_claim_diff_chairman("a question", [], items)
 
-    sent_prompt = mock_query.call_args.args[1][0]["content"]
-    assert "claude claim text" in sent_prompt
-    assert "gemini claim text" in sent_prompt
-    assert "unconfirmed claim text" in sent_prompt
+    user_message = mock_query.call_args.args[1][1]["content"]
+    assert "claude claim text" in user_message
+    assert "gemini claim text" in user_message
+    assert "unconfirmed claim text" in user_message
 
 
-async def test_chairman_query_failure_returns_error_response_without_raising():
-    with patch.object(council, "query_model", new=AsyncMock(return_value=None)):
+async def test_chairman_query_failure_returns_safe_fallback_without_raising():
+    with patch.object(council, "query_model", new=AsyncMock(return_value=None)) as mock_query:
         result = await council.synthesize_claim_diff_chairman("a question", [], [])
 
+    assert mock_query.await_count == 2
     assert result["model"] == council.CHAIRMAN_MODEL
-    assert "response" in result
+    assert result["structured"].agreed_findings == ""
+    assert isinstance(result["response"], str)
 
 
 async def test_regression_failed_model_call_never_silently_dropped_or_treated_as_agreement():

@@ -1,7 +1,7 @@
 """3-stage LLM Council orchestration."""
 
 import json
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from pydantic import BaseModel, ValidationError
 from .llm_client import query_models_parallel, query_model
 from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
@@ -470,6 +470,46 @@ def _format_diff_section(items: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+CHAIRMAN_SYSTEM_PROMPT = f"""{CHAIRMAN_NEVER_EMERGENCY_RULE}
+
+You are organizing a disagreement-preserving summary for two family caregivers who already saw two AI models' anonymized answers to their question about a family member's care. The chairman organizes and explains the mechanically-computed diff; it does not re-decide what counts as a conflict.
+
+Respond with ONLY a JSON object matching this exact shape - no markdown fences, no extra text before or after:
+{{
+  "agreed_findings": "<a short paragraph summarizing what both models agree on - an empty string if there are none, never omit the field>",
+  "disagreement_summary": "<a short paragraph explaining the disagreement or gap in plain language - an empty string if there are no conflicting/unconfirmed items>",
+  "observations": [
+    {{"label": "<short label for what this group of checks is for>", "items": ["<a specific observation, symptom, or check - not which claim to believe, but what to go look at>"]}}
+  ],
+  "questions_for_doctor": ["<a short, specific question the caregivers should bring to the next appointment>"]
+}}
+
+If there is no disagreement, set "disagreement_summary" to an empty string and "observations" to an empty list - never omit them or leave them implicit."""
+
+
+def _parse_chairman_summary(raw: Optional[Dict[str, Any]]) -> Optional[ChairmanSummary]:
+    if raw is None or not raw.get("content"):
+        return None
+    try:
+        data = json.loads(raw["content"])
+        return ChairmanSummary(**data)
+    except (json.JSONDecodeError, ValidationError, TypeError):
+        return None
+
+
+def _flatten_chairman_summary(summary: ChairmanSummary) -> str:
+    lines = ["Agreed Findings:", summary.agreed_findings or "None."]
+    lines += ["", "Conflicting / Unconfirmed:", summary.disagreement_summary or "None."]
+    for group in summary.observations:
+        lines.append(f"- {group.label}:")
+        for item in group.items:
+            lines.append(f"  - {item}")
+    lines += ["", "Questions for the Doctor:"]
+    for question in summary.questions_for_doctor:
+        lines.append(f"- {question}")
+    return "\n".join(lines)
+
+
 async def synthesize_claim_diff_chairman(
     user_query: str,
     agreed: List[ClaimPair],
@@ -477,54 +517,50 @@ async def synthesize_claim_diff_chairman(
     chairman_model: str = CHAIRMAN_MODEL,
 ) -> Dict[str, Any]:
     """
-    Chairman synthesis for the claim-diff mechanism (validation phase).
+    Chairman synthesis for the claim-diff mechanism.
 
-    Three sections, mapped to the design doc's actual primitive: (1)
-    agreed findings, (2) conflicting/unconfirmed claims ranked by
-    actionability plus the specific observation that would help resolve
-    which is right, (3) open questions for the doctor. The chairman
-    organizes and explains the mechanically-computed diff; it does not
-    re-decide what counts as a conflict.
-
-    Model identity stays anonymized as "Model A"/"Model B" even to the
-    chairman itself, which is a council member and a claim source here -
-    the same self-preference mitigation stage 2 already applies via
-    label_to_model, reused in spirit for this claim-level diff. Hard
-    rule: never an emergency verdict, in either direction. Each section
-    says so explicitly when empty rather than rendering blank.
+    Returns structured JSON (agreed findings / disagreement + observations /
+    questions for the doctor), Pydantic-validated with retry-then-fallback -
+    the same pattern as claim_diff.extract_claims, so a malformed or failed
+    LLM response never crashes the caller. "structured" is the ChairmanSummary
+    object for callers that render it (the API endpoint); "response" is a
+    flattened plain-text rendition for callers that only need to judge text
+    (eval_harness's retention/emergency-verdict checks).
     """
     agreed_text = _format_agreed_section(agreed)
     diff_text = _format_diff_section(ranked_diff_items)
 
-    chairman_prompt = f"""{CHAIRMAN_NEVER_EMERGENCY_RULE}
-
-You are organizing a disagreement-preserving summary for two family caregivers who already saw two AI models' anonymized answers to their question about a family member's care.
-
-Original Question: {user_query}
+    user_message = f"""Original Question: {user_query}
 
 AGREED FINDINGS (both models agree):
 {agreed_text}
 
 CONFLICTING / UNCONFIRMED CLAIMS (ranked by actionability, most important first):
-{diff_text}
+{diff_text}"""
 
-Write exactly three sections:
-1. Agreed Findings: summarize what both models agree on.
-2. Conflicting / Unconfirmed Claims: for each item above, explain the disagreement or gap in plain language, and name the SPECIFIC observation, symptom, or check that would help distinguish which claim is right - not which one to believe, but what to go look at.
-3. Questions for the Doctor: a short list of questions the caregivers should bring to the next appointment, based on the above.
+    messages = [
+        {"role": "system", "content": CHAIRMAN_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
 
-If a section has no content, say so explicitly in that section - never leave it blank. Do not add a fourth section or an overall recommendation."""
+    for _ in range(2):
+        raw = await query_model(chairman_model, messages)
+        summary = _parse_chairman_summary(raw)
+        if summary is not None:
+            return {
+                "model": chairman_model,
+                "structured": summary,
+                "response": _flatten_chairman_summary(summary),
+            }
 
-    messages = [{"role": "user", "content": chairman_prompt}]
-    response = await query_model(chairman_model, messages)
-
-    if response is None:
-        return {
-            "model": chairman_model,
-            "response": "Error: Unable to generate the claim-diff synthesis."
-        }
-
+    fallback = ChairmanSummary(
+        agreed_findings="",
+        disagreement_summary="Unable to generate a summary for this case - please try again.",
+        observations=[],
+        questions_for_doctor=[],
+    )
     return {
         "model": chairman_model,
-        "response": response.get("content", "")
+        "structured": fallback,
+        "response": _flatten_chairman_summary(fallback),
     }
