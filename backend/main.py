@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from pathlib import Path
 import uuid
 import json
@@ -180,36 +180,54 @@ async def analyze_question(request: AnalyzeRequest):
 
     model_a_result, model_b_result = ok_results[0], ok_results[1]
 
-    claims_a = await extract_claims(model_a_result["response"])
-    claims_b = await extract_claims(model_b_result["response"])
+    try:
+        claims_a = await extract_claims(model_a_result["response"])
+        claims_b = await extract_claims(model_b_result["response"])
 
-    alignment = await align_claims(claims_a, claims_b)
+        alignment = await align_claims(claims_a, claims_b)
 
-    agreed = []
-    conflicting = []
-    for pair in alignment.aligned:
-        state = await classify_compatibility(pair)
-        if state == ClaimState.AGREED:
-            agreed.append(pair)
-        else:
-            conflicting.append(pair)
+        agreed = []
+        conflicting = []
+        for pair in alignment.aligned:
+            state = await classify_compatibility(pair)
+            if state == ClaimState.AGREED:
+                agreed.append(pair)
+            else:
+                conflicting.append(pair)
 
-    diff_items = build_ranked_diff_items(
-        conflicting=conflicting,
-        unconfirmed_a=alignment.unaligned_a,
-        unconfirmed_b=alignment.unaligned_b,
-    )
+        diff_items = build_ranked_diff_items(
+            conflicting=conflicting,
+            unconfirmed_a=alignment.unaligned_a,
+            unconfirmed_b=alignment.unaligned_b,
+        )
 
-    chairman_result = await synthesize_claim_diff_chairman(request.question, agreed, diff_items)
-    summary = chairman_result["structured"]
+        chairman_result = await synthesize_claim_diff_chairman(request.question, agreed, diff_items)
+        summary = chairman_result["structured"]
+    except Exception:
+        return {
+            "question": request.question,
+            "degraded": True,
+            "error": "Something went wrong while comparing the two answers. Please try again.",
+            "models": [],
+            "counts": None,
+            "summary": None,
+        }
 
     return {
         "question": request.question,
         "degraded": False,
         "error": None,
         "models": [
-            {"name": _model_display_name(model_a_result["model"]), "answer": model_a_result["response"]},
-            {"name": _model_display_name(model_b_result["model"]), "answer": model_b_result["response"]},
+            {
+                "label": "Model A",
+                "name": _model_display_name(model_a_result["model"]),
+                "answer": model_a_result["response"],
+            },
+            {
+                "label": "Model B",
+                "name": _model_display_name(model_b_result["model"]),
+                "answer": model_b_result["response"],
+            },
         ],
         "counts": {
             "agreed": len(agreed),
