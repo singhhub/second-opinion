@@ -99,13 +99,13 @@
   .raw-panel{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px; display:none;}
   .raw-panel[data-active="true"]{display:block;}
   .raw-panel .disclaimer{font-size:.76rem; color:var(--faint); margin-bottom:10px; font-style:italic;}
-  .raw-panel p{font-size:.92rem; line-height:1.55; margin:0;}
+  .raw-panel p{font-size:.92rem; line-height:1.55; margin:0; white-space:pre-wrap;}
 
   .verdict-card{border:1px solid var(--line); border-radius:14px; overflow:hidden;}
   .verdict-block{padding:16px; border-left:4px solid var(--c); background:var(--bg);}
   .verdict-block + .verdict-block{border-top:1px solid var(--line);}
   .verdict-block .vt{display:flex; align-items:center; gap:8px; font-size:.78rem; font-weight:700; letter-spacing:.03em; text-transform:uppercase; color:var(--c); margin-bottom:8px;}
-  .verdict-block p{font-size:.92rem; line-height:1.55; margin:0;}
+  .verdict-block p{font-size:.92rem; line-height:1.55; margin:0; white-space:pre-wrap;}
 
   .observe-box{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px;}
   .observe-box .ot{font-size:.74rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); margin-bottom:6px;}
@@ -243,7 +243,7 @@
       tab.className = 'tab';
       tab.setAttribute('role', 'tab');
       tab.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
-      tab.textContent = model.name;
+      tab.textContent = model.label + ' · ' + model.name;
       tab.addEventListener('click', function () { selectModelTab(i); });
       tabsEl.appendChild(tab);
 
@@ -253,7 +253,7 @@
 
       var disclaimer = document.createElement('div');
       disclaimer.className = 'disclaimer';
-      disclaimer.textContent = model.name + "'s raw read - not a final answer.";
+      disclaimer.textContent = model.label + ' · ' + model.name + "'s raw read - not a final answer.";
 
       var p = document.createElement('p');
       p.textContent = model.answer;
@@ -335,7 +335,7 @@
     }
 
     if (!response.ok) {
-      showError(data.detail ? JSON.stringify(data.detail) : 'Something went wrong. Please try again.');
+      showError(data.detail ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)) : 'Something went wrong. Please try again.');
       return;
     }
 
