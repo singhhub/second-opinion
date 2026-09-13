@@ -1,7 +1,7 @@
 """3-stage LLM Council orchestration."""
 
 from typing import List, Dict, Any, Tuple
-from .omniroute import query_models_parallel, query_model
+from .llm_client import query_models_parallel, query_model
 from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
 from .claim_diff import Claim, ClaimPair, ClaimState, categorize_claim
 
