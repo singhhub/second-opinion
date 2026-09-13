@@ -1,9 +1,24 @@
 """3-stage LLM Council orchestration."""
 
+import json
 from typing import List, Dict, Any, Tuple
+from pydantic import BaseModel, ValidationError
 from .llm_client import query_models_parallel, query_model
 from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
 from .claim_diff import Claim, ClaimPair, ClaimState, categorize_claim
+
+
+class ObservationGroup(BaseModel):
+    label: str
+    items: List[str] = []
+
+
+class ChairmanSummary(BaseModel):
+    agreed_findings: str
+    disagreement_summary: str
+    observations: List[ObservationGroup] = []
+    questions_for_doctor: List[str] = []
+
 
 CHAIRMAN_NEVER_EMERGENCY_RULE = (
     "You must NEVER state or imply whether this is or is not a medical "

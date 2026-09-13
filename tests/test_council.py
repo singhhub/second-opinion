@@ -314,3 +314,26 @@ async def test_regression_stage3_prompt_names_the_failed_model_explicitly():
     sent_prompt = mock_query.call_args.args[1][0]["content"]
     assert "DEGRADED" in sent_prompt
     assert failing_model in sent_prompt
+
+
+def test_chairman_summary_models_accept_full_shape():
+    from backend.council import ChairmanSummary, ObservationGroup
+
+    summary = ChairmanSummary(
+        agreed_findings="both agree on X",
+        disagreement_summary="they disagree on Y",
+        observations=[ObservationGroup(label="check this", items=["do a", "do b"])],
+        questions_for_doctor=["ask this"],
+    )
+
+    assert summary.agreed_findings == "both agree on X"
+    assert summary.observations[0].items == ["do a", "do b"]
+
+
+def test_chairman_summary_models_default_empty_lists():
+    from backend.council import ChairmanSummary
+
+    summary = ChairmanSummary(agreed_findings="", disagreement_summary="")
+
+    assert summary.observations == []
+    assert summary.questions_for_doctor == []
