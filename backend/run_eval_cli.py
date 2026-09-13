@@ -20,14 +20,34 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import IO, Any, Dict, List, Optional
 
 from . import eval_harness
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "eval"
 CASE_FILES = [DATA_DIR / "synthetic_cases.json", DATA_DIR / "historical_cases.json"]
+
+
+class Tee:
+    """Writes every write() to all of `streams` - stdout keeps live output
+    on screen, the log file keeps a permanent record of the same run
+    (including LLM_CLIENT_VERBOSE's request/response trace, which
+    otherwise only ever went to the terminal and was lost once it
+    scrolled off)."""
+
+    def __init__(self, *streams: IO[str]) -> None:
+        self.streams = streams
+
+    def write(self, data: str) -> None:
+        for stream in self.streams:
+            stream.write(data)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
 
 
 def filter_cases(
@@ -97,8 +117,18 @@ def main() -> None:
         if args.output
         else DATA_DIR / "results" / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
     )
+    log_path = output_path.with_suffix(".log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    asyncio.run(main_async(case_ids, output_path))
+    real_stdout = sys.stdout
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        sys.stdout = Tee(real_stdout, log_file)
+        try:
+            asyncio.run(main_async(case_ids, output_path))
+        finally:
+            sys.stdout = real_stdout
+
+    print(f"Full log saved to {log_path}")
 
 
 if __name__ == "__main__":

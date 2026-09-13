@@ -5,6 +5,7 @@ check) are unit tested here - main()/main_async() are thin argparse/IO
 glue over eval_harness, which is already tested in test_eval_harness.py.
 """
 
+import io
 import os
 
 import pytest
@@ -84,3 +85,28 @@ def test_check_api_keys_passes_when_both_present(monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "goog-test")
 
     run_eval_cli.check_api_keys()  # must not raise
+
+
+def test_tee_writes_to_every_stream():
+    stream_a = io.StringIO()
+    stream_b = io.StringIO()
+    tee = run_eval_cli.Tee(stream_a, stream_b)
+
+    tee.write("hello\n")
+
+    assert stream_a.getvalue() == "hello\n"
+    assert stream_b.getvalue() == "hello\n"
+
+
+def test_tee_flush_flushes_every_stream():
+    flushed = []
+
+    class _Recorder(io.StringIO):
+        def flush(self):
+            flushed.append(self)
+            super().flush()
+
+    a, b = _Recorder(), _Recorder()
+    run_eval_cli.Tee(a, b).flush()
+
+    assert flushed == [a, b]
