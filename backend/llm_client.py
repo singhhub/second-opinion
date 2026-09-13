@@ -23,6 +23,17 @@ load_dotenv()
 # Lives under data/ so it's covered by the existing data/ gitignore rule.
 CACHE_DIR = Path(os.getenv("LLM_CACHE_DIR", "data/cache"))
 
+# Opt-in request/response logging for debugging live runs - off by default
+# so normal usage and tests stay quiet. Enable with LLM_CLIENT_VERBOSE=1.
+VERBOSE = os.getenv("LLM_CLIENT_VERBOSE", "").lower() in ("1", "true", "yes")
+
+
+def _log(label: str, **fields: Any) -> None:
+    if not VERBOSE:
+        return
+    parts = "  ".join(f"{k}={v!r}" for k, v in fields.items())
+    print(f"[llm_client] {label}  {parts}")
+
 
 def cache_key(*parts: str) -> str:
     return hashlib.sha256("||".join(parts).encode("utf-8")).hexdigest()
@@ -54,13 +65,16 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 GOOGLE_EMBEDDING_MODEL = "gemini-embedding-001"
 
-# Real-world observation, not theoretical: a live eval run saw intermittent
-# "all connection attempts failed" errors that vanished on a single isolated
-# retry, with no other symptom. A short retry-with-backoff for transient
-# failures - never for a deterministic 4xx like bad auth or a bad request,
-# where retrying just wastes another call for the same answer.
-MAX_RETRIES = 2
-RETRY_BACKOFF_SECONDS = 0.5
+# Real-world observation, not theoretical: live eval runs saw intermittent
+# "all connection attempts failed" errors that never reproduced in dozens of
+# isolated single/rapid-sequential/alternating-host diagnostic calls - only
+# in the longer, slower real run. That points to a several-second network
+# blip rather than a code bug, so retries need real wall-clock time to ride
+# it out, not just a couple of quick attempts. Exponential backoff, capped
+# retry count - never for a deterministic 4xx like bad auth or a bad
+# request, where retrying just wastes another call for the same answer.
+MAX_RETRIES = 4
+RETRY_BACKOFF_SECONDS = 1.0
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
@@ -74,20 +88,27 @@ async def _post_json(
 ) -> Dict[str, Any]:
     last_error: Exception = RuntimeError("unreachable")
     for attempt in range(MAX_RETRIES + 1):
+        _log("→ POST", url=url, attempt=f"{attempt + 1}/{MAX_RETRIES + 1}", payload_preview=str(json_payload)[:400])
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(url, headers=headers, params=params, json=json_payload)
                 response.raise_for_status()
-                return response.json()
+                data = response.json()
+                _log("← 200", url=url, attempt=attempt + 1, body_preview=str(data)[:400])
+                return data
         except httpx.HTTPStatusError as e:
+            _log("← HTTP ERROR", url=url, attempt=attempt + 1, status=e.response.status_code, body=e.response.text[:400])
             if e.response.status_code not in _RETRYABLE_STATUS_CODES or attempt == MAX_RETRIES:
                 raise
             last_error = e
         except httpx.TransportError as e:
+            _log("← TRANSPORT ERROR", url=url, attempt=attempt + 1, error=f"{type(e).__name__}: {e}")
             if attempt == MAX_RETRIES:
                 raise
             last_error = e
-        await asyncio.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+        delay = RETRY_BACKOFF_SECONDS * (2**attempt)
+        _log("  retrying after", seconds=delay)
+        await asyncio.sleep(delay)
     raise last_error
 
 
@@ -179,8 +200,13 @@ async def query_model(
         print(f"Error querying model {model}: unknown provider '{provider}'")
         return None
 
+    last_msg = messages[-1]["content"] if messages else ""
+    _log("QUERY_MODEL start", model=model, num_messages=len(messages), last_message_preview=last_msg[:200])
+
     try:
-        return await handler(model_id, messages, timeout)
+        result = await handler(model_id, messages, timeout)
+        _log("QUERY_MODEL done", model=model, content_preview=(result.get("content") or "")[:300])
+        return result
     except Exception as e:
         print(f"Error querying model {model}: {e}")
         return None
@@ -207,10 +233,13 @@ async def embed_text(
     if use_cache:
         cached = cache_read(key)
         if cached is not None:
+            _log("EMBED cache hit", model=model, text_preview=text[:100], dims=len(cached))
             return cached
 
     url = f"{GOOGLE_API_URL}/{model}:embedContent"
     payload = {"content": {"parts": [{"text": text}]}}
+
+    _log("EMBED start", model=model, text_preview=text[:100])
 
     try:
         data = await _post_json(url, json_payload=payload, timeout=timeout, params={"key": GOOGLE_API_KEY})
@@ -218,6 +247,8 @@ async def embed_text(
     except Exception as e:
         print(f"Error embedding text: {e}")
         return None
+
+    _log("EMBED done", model=model, dims=len(values))
 
     if use_cache:
         cache_write(key, values)

@@ -74,31 +74,51 @@ async def check_never_emergency_verdict(
 
 async def run_new_mechanism(case: Dict[str, Any]) -> Dict[str, Any]:
     """Run one eval case through the claim-diff mechanism end to end."""
+    llm_client._log("STAGE 1/6 extract_claims (model A)", case_id=case.get("id"))
     claims_a = await extract_claims(case["model_a_response"])
+    llm_client._log("  -> claims A", claims=[c.text[:60] for c in claims_a])
+
+    llm_client._log("STAGE 2/6 extract_claims (model B)", case_id=case.get("id"))
     claims_b = await extract_claims(case["model_b_response"])
+    llm_client._log("  -> claims B", claims=[c.text[:60] for c in claims_b])
 
+    llm_client._log("STAGE 3/6 align_claims")
     alignment = await align_claims(claims_a, claims_b)
+    llm_client._log(
+        "  -> alignment",
+        aligned=len(alignment.aligned),
+        unaligned_a=len(alignment.unaligned_a),
+        unaligned_b=len(alignment.unaligned_b),
+    )
 
+    llm_client._log("STAGE 4/6 classify_compatibility")
     agreed = []
     conflicting = []
     for pair in alignment.aligned:
         state = await classify_compatibility(pair)
+        llm_client._log("  pair ->", state=state.value, a=pair.claim_a.text[:50], b=pair.claim_b.text[:50])
         if state == ClaimState.AGREED:
             agreed.append(pair)
         else:
             conflicting.append(pair)
 
+    llm_client._log("STAGE 5/6 build_ranked_diff_items (no LLM call)")
     diff_items = council.build_ranked_diff_items(
         conflicting=conflicting,
         unconfirmed_a=alignment.unaligned_a,
         unconfirmed_b=alignment.unaligned_b,
     )
+    llm_client._log("  -> ranked diff items", count=len(diff_items))
 
+    llm_client._log("STAGE 6/6 synthesize_claim_diff_chairman")
     chairman_result = await council.synthesize_claim_diff_chairman(
         case["question"], agreed, diff_items
     )
+    llm_client._log("  -> chairman output", preview=chairman_result["response"][:300])
 
+    llm_client._log("CHECK check_claim_retained")
     retained = await check_claim_retained(case["known_correct_claim"], chairman_result["response"])
+    llm_client._log("  -> retained", retained=retained)
 
     return {
         "mechanism": "claim_diff",
@@ -118,14 +138,21 @@ async def run_control(case: Dict[str, Any]) -> Dict[str, Any]:
         {"model": COUNCIL_MODELS[1], "status": "ok", "response": case["model_b_response"]},
     ]
 
+    llm_client._log("CONTROL STAGE 1/3 stage2_collect_rankings")
     stage2_results, _label_to_model = await council.stage2_collect_rankings(
         case["question"], stage1_results
     )
+    llm_client._log("  -> stage2 rankings", count=len(stage2_results))
+
+    llm_client._log("CONTROL STAGE 2/3 stage3_synthesize_final")
     stage3_result = await council.stage3_synthesize_final(
         case["question"], stage1_results, stage2_results
     )
+    llm_client._log("  -> stage3 output", preview=stage3_result["response"][:300])
 
+    llm_client._log("CONTROL STAGE 3/3 check_claim_retained")
     retained = await check_claim_retained(case["known_correct_claim"], stage3_result["response"])
+    llm_client._log("  -> retained", retained=retained)
 
     return {
         "mechanism": "control",
