@@ -487,11 +487,32 @@ Respond with ONLY a JSON object matching this exact shape - no markdown fences, 
 If there is no disagreement, set "disagreement_summary" to an empty string and "observations" to an empty list - never omit them or leave them implicit."""
 
 
+def _strip_json_fence(text: str) -> str:
+    """
+    Strip a leading/trailing markdown code fence from a model response, if
+    present. Gemini (the chairman model) commonly wraps JSON in ```json ...
+    ``` fences despite prompt instructions not to; since the retry re-sends
+    identical messages, a model with a deterministic fencing habit would
+    otherwise fail both attempts every time. Pure string transformation -
+    no-op when there's no fence.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    first_fence_end = stripped.find("\n")
+    last_fence_start = stripped.rfind("```")
+    if first_fence_end == -1 or last_fence_start <= 0:
+        return stripped
+
+    return stripped[first_fence_end + 1:last_fence_start].strip()
+
+
 def _parse_chairman_summary(raw: Optional[Dict[str, Any]]) -> Optional[ChairmanSummary]:
     if raw is None or not raw.get("content"):
         return None
     try:
-        data = json.loads(raw["content"])
+        data = json.loads(_strip_json_fence(raw["content"]))
         return ChairmanSummary(**data)
     except (json.JSONDecodeError, ValidationError, TypeError):
         return None
