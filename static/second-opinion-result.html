@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Second Opinion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --page-bg:#efe9db; --paper:#f8f5ee; --surface:#ffffff; --surface-2:#efe8d9;
+    --ink:#211c16; --muted:#7a7161; --faint:#a49c8b; --line:#e3dbc7; --line-strong:#d3c8ac;
+    --accent:#2c5d63; --accent-ink:#183c41; --accent-soft:#dde9e8;
+    --agreed:#3e7d57; --agreed-soft:#e3efe4;
+    --conflicting:#a9631f; --conflicting-soft:#f5e8d7;
+    --unconfirmed:#6c5e86; --unconfirmed-soft:#eae4f2;
+    --danger:#a6402e; --danger-soft:#f3ded9;
+    --shadow: 0 1px 2px rgba(33,28,22,.06), 0 20px 44px -20px rgba(33,28,22,.28);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --page-bg:#0f0d0a; --paper:#1a1712; --surface:#211d17; --surface-2:#282319;
+      --ink:#ece5d6; --muted:#a89d89; --faint:#6f6656; --line:#3a3226; --line-strong:#4c4230;
+      --accent:#7cbcbf; --accent-ink:#cfe7e7; --accent-soft:#22322f;
+      --agreed:#7ecb98; --agreed-soft:#1e2c22;
+      --conflicting:#e5a868; --conflicting-soft:#332619;
+      --unconfirmed:#bba8de; --unconfirmed-soft:#282236;
+      --danger:#e08574; --danger-soft:#3d2621;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 20px 44px -20px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"]{
+    --page-bg:#0f0d0a; --paper:#1a1712; --surface:#211d17; --surface-2:#282319;
+    --ink:#ece5d6; --muted:#a89d89; --faint:#6f6656; --line:#3a3226; --line-strong:#4c4230;
+    --accent:#7cbcbf; --accent-ink:#cfe7e7; --accent-soft:#22322f;
+    --agreed:#7ecb98; --agreed-soft:#1e2c22;
+    --conflicting:#e5a868; --conflicting-soft:#332619;
+    --unconfirmed:#bba8de; --unconfirmed-soft:#282236;
+    --danger:#e08574; --danger-soft:#3d2621;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 20px 44px -20px rgba(0,0,0,.7);
+  }
+  *{box-sizing:border-box;}
+  body{
+    background:var(--page-bg); color:var(--ink);
+    font-family:"Public Sans", ui-sans-serif, system-ui, sans-serif;
+    margin:0; padding-block:28px 48px; padding-inline:16px;
+  }
+  .frame{
+    max-width:440px; margin-inline:auto; background:var(--paper);
+    border-radius:22px; box-shadow:var(--shadow); overflow:hidden; border:1px solid var(--line);
+  }
+  .topbar{display:flex; align-items:center; gap:10px; padding:16px 20px 14px; border-bottom:1px solid var(--line);}
+  .topbar .titles{flex:1; min-width:0;}
+  .topbar .app-name{font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:600;}
+  .topbar .screen-name{font-size:1.05rem; font-weight:700; margin-top:1px;}
+  .scroll{padding:18px 20px 26px; display:flex; flex-direction:column; gap:20px;}
+
+  #form-section{display:flex; flex-direction:column; gap:10px;}
+  #form-section label{font-size:.82rem; font-weight:600; color:var(--muted);}
+  #question-input{
+    width:100%; font-family:inherit; font-size:.95rem; padding:12px 14px;
+    border:1px solid var(--line-strong); border-radius:12px; background:var(--surface); color:var(--ink);
+    resize:vertical; min-height:72px;
+  }
+  #question-input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  #submit-btn{
+    font-family:inherit; font-size:.92rem; font-weight:700; color:var(--paper);
+    background:var(--accent); border:none; border-radius:12px; padding:12px; cursor:pointer;
+  }
+  #submit-btn:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  #submit-btn:disabled{opacity:.6; cursor:not-allowed;}
+
+  #loading-section, #error-section{text-align:center; padding:24px 8px; font-size:.9rem; color:var(--muted);}
+  #error-section{color:var(--danger); background:var(--danger-soft); border-radius:12px;}
+
+  .question-label{font-size:.72rem; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:6px;}
+  .question-card{
+    background:var(--accent-soft); color:var(--accent-ink); border-radius:16px 16px 16px 4px;
+    padding:14px 16px; font-size:.98rem; line-height:1.45; font-weight:500;
+  }
+
+  .summary-strip{display:flex; gap:8px;}
+  .chip{flex:1; display:flex; flex-direction:column; align-items:center; gap:2px; padding:10px 4px; border-radius:12px; border:1px solid var(--line); background:var(--surface);}
+  .chip .num{font-size:1.35rem; font-weight:800; font-variant-numeric:tabular-nums; line-height:1;}
+  .chip .lbl{font-size:.68rem; color:var(--muted); font-weight:600;}
+  .chip.agreed .num{color:var(--agreed);}
+  .chip.conflicting .num{color:var(--conflicting);}
+  .chip.unconfirmed .num{color:var(--unconfirmed);}
+
+  .section-title{display:flex; align-items:baseline; gap:8px; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:700;}
+  .section-title .hint{font-size:.72rem; letter-spacing:0; text-transform:none; color:var(--faint); font-weight:500;}
+
+  .tabs{display:flex; gap:6px; background:var(--surface-2); padding:4px; border-radius:12px;}
+  .tab{flex:1; border:none; background:transparent; color:var(--muted); font-family:inherit; font-size:.86rem; font-weight:600; padding:9px 4px; border-radius:9px; cursor:pointer;}
+  .tab[aria-selected="true"]{background:var(--surface); color:var(--ink); box-shadow:var(--shadow);}
+  .tab:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+  .raw-panel{background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px; display:none;}
+  .raw-panel[data-active="true"]{display:block;}
+  .raw-panel .disclaimer{font-size:.76rem; color:var(--faint); margin-bottom:10px; font-style:italic;}
+  .raw-panel p{font-size:.92rem; line-height:1.55; margin:0;}
+
+  .verdict-card{border:1px solid var(--line); border-radius:14px; overflow:hidden;}
+  .verdict-block{padding:16px; border-left:4px solid var(--c); background:var(--bg);}
+  .verdict-block + .verdict-block{border-top:1px solid var(--line);}
+  .verdict-block .vt{display:flex; align-items:center; gap:8px; font-size:.78rem; font-weight:700; letter-spacing:.03em; text-transform:uppercase; color:var(--c); margin-bottom:8px;}
+  .verdict-block p{font-size:.92rem; line-height:1.55; margin:0;}
+
+  .observe-box{background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px;}
+  .observe-box .ot{font-size:.74rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); margin-bottom:6px;}
+  .observe-box ul{margin:0; padding-left:18px;}
+  .observe-box li{font-size:.88rem; line-height:1.5; margin-bottom:6px;}
+  .observe-box li:last-child{margin-bottom:0;}
+  .observe-box b{color:var(--ink);}
+
+  .qlist{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px;}
+  .qitem-label{display:flex; align-items:flex-start; gap:10px; cursor:pointer;}
+  .qitem input{
+    appearance:none; width:19px; height:19px; border:1.5px solid var(--line-strong); border-radius:5px;
+    margin-top:2px; flex-shrink:0; background:var(--surface); cursor:pointer; position:relative;
+  }
+  .qitem input:checked{background:var(--accent); border-color:var(--accent);}
+  .qitem input:checked::after{content:""; position:absolute; left:5px; top:1px; width:5px; height:10px; border:solid var(--paper); border-width:0 2px 2px 0; transform:rotate(40deg);}
+  .qitem input:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .qitem span{font-size:.92rem; line-height:1.5;}
+  .qitem input:checked ~ span{color:var(--muted); text-decoration:line-through; text-decoration-color:var(--faint);}
+
+  .footnote{font-size:.78rem; color:var(--muted); line-height:1.5; background:var(--surface-2); border-radius:12px; padding:12px 14px;}
+  .footnote b{color:var(--ink);}
+
+  [hidden]{display:none !important;}
+</style>
+</head>
+<body>
+
+<div class="frame">
+  <div class="topbar">
+    <div class="titles">
+      <div class="app-name">Second Opinion</div>
+      <div class="screen-name">Ask a Question</div>
+    </div>
+  </div>
+
+  <div class="scroll">
+
+    <form id="form-section">
+      <label for="question-input">What would you like a second opinion on?</label>
+      <textarea id="question-input" placeholder="e.g. My father, 78, suddenly seems confused..."></textarea>
+      <button type="submit" id="submit-btn">Ask both models</button>
+    </form>
+
+    <div id="loading-section" hidden>Asking Claude and Gemini, then comparing their answers - this takes a little while...</div>
+
+    <div id="error-section" hidden></div>
+
+    <div id="result-section" hidden style="display:flex; flex-direction:column; gap:20px;">
+
+      <div>
+        <div class="question-label">You asked</div>
+        <div class="question-card" id="question-text"></div>
+      </div>
+
+      <div class="summary-strip">
+        <div class="chip agreed"><span class="num" id="chip-agreed-num">0</span><span class="lbl">Agreed</span></div>
+        <div class="chip conflicting"><span class="num" id="chip-conflicting-num">0</span><span class="lbl">Conflicting</span></div>
+        <div class="chip unconfirmed"><span class="num" id="chip-unconfirmed-num">0</span><span class="lbl">Unconfirmed</span></div>
+      </div>
+
+      <div>
+        <div class="section-title" style="margin-bottom:10px;">What each model said <span class="hint">- tap to switch</span></div>
+        <div class="tabs" id="model-tabs" role="tablist" aria-label="Model raw reads"></div>
+        <div id="model-panels" style="margin-top:10px;"></div>
+      </div>
+
+      <div>
+        <div class="section-title" style="margin-bottom:10px;">Chairman's summary</div>
+        <div class="verdict-card">
+          <div class="verdict-block" style="--c:var(--agreed); --bg:var(--agreed-soft);">
+            <div class="vt">Agreed findings</div>
+            <p id="agreed-text"></p>
+          </div>
+          <div class="verdict-block" style="--c:var(--unconfirmed); --bg:var(--unconfirmed-soft);">
+            <div class="vt">Conflicting / unconfirmed</div>
+            <p id="disagreement-text"></p>
+            <div class="observe-box" id="observe-box" hidden>
+              <div class="ot">What to check</div>
+              <ul id="observe-list"></ul>
+            </div>
+          </div>
+          <div class="verdict-block" style="--c:var(--accent); --bg:var(--surface);">
+            <div class="vt">Questions for the doctor</div>
+            <ul class="qlist" id="questions-list"></ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="footnote">
+        <b>This isn't a diagnosis.</b> Second Opinion never tells you whether something is or isn't an emergency - it shows you where two models agree, where they don't, and what to go check. The call is yours and your doctor's.
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  function showState(state) {
+    document.getElementById('form-section').hidden = state === 'loading' || state === 'result';
+    document.getElementById('loading-section').hidden = state !== 'loading';
+    document.getElementById('error-section').hidden = state !== 'error';
+    document.getElementById('result-section').hidden = state !== 'result';
+    document.getElementById('submit-btn').disabled = state === 'loading';
+  }
+
+  function showError(message) {
+    var el = document.getElementById('error-section');
+    el.textContent = message;
+    showState('error');
+  }
+
+  function selectModelTab(index) {
+    var tabs = document.querySelectorAll('#model-tabs .tab');
+    var panels = document.querySelectorAll('#model-panels .raw-panel');
+    tabs.forEach(function (tab, i) { tab.setAttribute('aria-selected', i === index); });
+    panels.forEach(function (panel, i) { panel.setAttribute('data-active', i === index); });
+  }
+
+  function renderResult(data) {
+    document.getElementById('question-text').textContent = data.question;
+
+    document.getElementById('chip-agreed-num').textContent = data.counts.agreed;
+    document.getElementById('chip-conflicting-num').textContent = data.counts.conflicting;
+    document.getElementById('chip-unconfirmed-num').textContent = data.counts.unconfirmed;
+
+    var tabsEl = document.getElementById('model-tabs');
+    var panelsEl = document.getElementById('model-panels');
+    tabsEl.innerHTML = '';
+    panelsEl.innerHTML = '';
+
+    data.models.forEach(function (model, i) {
+      var tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'tab';
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+      tab.textContent = model.name;
+      tab.addEventListener('click', function () { selectModelTab(i); });
+      tabsEl.appendChild(tab);
+
+      var panel = document.createElement('div');
+      panel.className = 'raw-panel';
+      panel.setAttribute('data-active', i === 0 ? 'true' : 'false');
+
+      var disclaimer = document.createElement('div');
+      disclaimer.className = 'disclaimer';
+      disclaimer.textContent = model.name + "'s raw read - not a final answer.";
+
+      var p = document.createElement('p');
+      p.textContent = model.answer;
+
+      panel.appendChild(disclaimer);
+      panel.appendChild(p);
+      panelsEl.appendChild(panel);
+    });
+
+    document.getElementById('agreed-text').textContent =
+      data.summary.agreed_findings || 'No agreed findings - the two models did not converge on any shared claim.';
+
+    document.getElementById('disagreement-text').textContent =
+      data.summary.disagreement_summary || 'No conflicting or unconfirmed claims - the two models fully agreed.';
+
+    var observeBox = document.getElementById('observe-box');
+    var observeList = document.getElementById('observe-list');
+    observeList.innerHTML = '';
+    if (data.summary.observations.length > 0) {
+      observeBox.hidden = false;
+      data.summary.observations.forEach(function (group) {
+        var li = document.createElement('li');
+        var b = document.createElement('b');
+        b.textContent = group.label + ': ';
+        li.appendChild(b);
+        li.appendChild(document.createTextNode(group.items.join('; ')));
+        observeList.appendChild(li);
+      });
+    } else {
+      observeBox.hidden = true;
+    }
+
+    var qlist = document.getElementById('questions-list');
+    qlist.innerHTML = '';
+    data.summary.questions_for_doctor.forEach(function (question, i) {
+      var li = document.createElement('li');
+      li.className = 'qitem';
+      var label = document.createElement('label');
+      label.className = 'qitem-label';
+      var input = document.createElement('input');
+      input.type = 'checkbox';
+      input.id = 'q' + i;
+      var span = document.createElement('span');
+      span.textContent = question;
+      label.appendChild(input);
+      label.appendChild(span);
+      li.appendChild(label);
+      qlist.appendChild(li);
+    });
+
+    selectModelTab(0);
+  }
+
+  async function runAnalysis(event) {
+    event.preventDefault();
+    var question = document.getElementById('question-input').value.trim();
+    if (!question) return;
+
+    showState('loading');
+
+    var response;
+    try {
+      response = await fetch('/api/second-opinion/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: question })
+      });
+    } catch (err) {
+      showError('Could not reach the backend. Is it running? (python -m backend.main)');
+      return;
+    }
+
+    var data;
+    try {
+      data = await response.json();
+    } catch (err) {
+      showError('The backend returned something unexpected. Please try again.');
+      return;
+    }
+
+    if (!response.ok) {
+      showError(data.detail ? JSON.stringify(data.detail) : 'Something went wrong. Please try again.');
+      return;
+    }
+
+    if (data.degraded) {
+      showError(data.error || 'One or both models failed to respond. Please try again.');
+      return;
+    }
+
+    renderResult(data);
+    showState('result');
+  }
+
+  document.getElementById('form-section').addEventListener('submit', runAnalysis);
+</script>
+
+</body>
+</html>
