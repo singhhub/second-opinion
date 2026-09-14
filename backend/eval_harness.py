@@ -1,12 +1,18 @@
-"""Eval harness for the Claim-Diff Mechanism validation phase.
+"""Eval harness for the Claim-Diff Mechanism.
 
-Runs each fixed eval case (see data/eval/) through both the new
-claim-diff mechanism and the current ranking-and-synthesis pipeline as a
-control, and produces a machine-checkable retention report (Success
+Runs each fixed eval case (see data/eval/) through the claim-diff
+mechanism and produces a machine-checkable retention report (Success
 Criterion 1). Per the design doc's Approach C, stage 1 is never re-run
 live here - each case's model_a_response/model_b_response IS the fixed
 stage-1 input, from an archived historical conversation or a
 constructed synthetic pair.
+
+This originally also ran a control comparison against the legacy
+ranking-and-synthesis pipeline, to prove the new mechanism retained
+claims at least as well as the old one before committing to it. Now
+that the legacy pipeline has been removed, there's nothing left to
+compare against - this harness is the ongoing regression check for the
+claim-diff mechanism against the fixed eval set.
 """
 
 import json
@@ -15,7 +21,6 @@ from typing import Any, Dict, List
 
 from . import council, llm_client
 from .claim_diff import ClaimState, align_claims, classify_compatibility, extract_claims
-from .config import COUNCIL_MODELS
 
 RETENTION_JUDGE_MODEL = "claude/claude-sonnet-4-5-20250929"
 
@@ -127,55 +132,19 @@ async def run_new_mechanism(case: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def run_control(case: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Run one eval case through the current ranking-and-synthesis pipeline
-    as a control - today's COUNCIL_MODELS labels, fed the fixed
-    stage-1 responses rather than a live stage 1 call.
-    """
-    stage1_results = [
-        {"model": COUNCIL_MODELS[0], "status": "ok", "response": case["model_a_response"]},
-        {"model": COUNCIL_MODELS[1], "status": "ok", "response": case["model_b_response"]},
-    ]
-
-    llm_client._log("CONTROL STAGE 1/3 stage2_collect_rankings")
-    stage2_results, _label_to_model = await council.stage2_collect_rankings(
-        case["question"], stage1_results
-    )
-    llm_client._log("  -> stage2 rankings", count=len(stage2_results))
-
-    llm_client._log("CONTROL STAGE 2/3 stage3_synthesize_final")
-    stage3_result = await council.stage3_synthesize_final(
-        case["question"], stage1_results, stage2_results
-    )
-    llm_client._log("  -> stage3 output", preview=stage3_result["response"][:300])
-
-    llm_client._log("CONTROL STAGE 3/3 check_claim_retained")
-    retained = await check_claim_retained(case["known_correct_claim"], stage3_result["response"])
-    llm_client._log("  -> retained", retained=retained)
-
-    return {
-        "mechanism": "control",
-        "retained": retained,
-        "chairman_output": stage3_result["response"],
-    }
-
-
 async def run_eval_case(case: Dict[str, Any]) -> Dict[str, Any]:
     new_mechanism_result = await run_new_mechanism(case)
-    control_result = await run_control(case)
 
     return {
         "case_id": case.get("id", case["question"][:40]),
         "case_source": case.get("case_source", "unknown"),
         "new_mechanism": new_mechanism_result,
-        "control": control_result,
     }
 
 
 async def run_eval_harness(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Run every case through both mechanisms and report counts, not a
+    Run every case through the mechanism and report counts, not a
     percentage - the sample is too small for a rate to mean anything.
     """
     results = [await run_eval_case(case) for case in cases]
@@ -183,7 +152,6 @@ async def run_eval_harness(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "total_cases": len(results),
         "new_mechanism_retained_count": sum(1 for r in results if r["new_mechanism"]["retained"]),
-        "control_retained_count": sum(1 for r in results if r["control"]["retained"]),
         "cases": results,
     }
 

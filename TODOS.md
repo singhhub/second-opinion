@@ -31,8 +31,10 @@ it should not sit."
 
 **What:** Build the full spec (`docs/superpowers/specs/2026-08-23-medical-rag-design.md`),
 including retrieval (fixed spine, hybrid keyword search), multi-patient
-scoping, and updating `storage.py`/`main.py`/`frontend/src/components/Stage2.jsx`
-once the claim-diff format replaces the ranking format.
+scoping, and a real persistence layer + richer UI for the claim-diff result
+(the legacy `storage.py`/React frontend were removed once the claim-diff
+mechanism became the only mechanism — this phase needs its own, built for
+the claim-diff format from the start, not an update to the old ones).
 
 **Why:** This is the actual product, not just the mechanism proof — the
 validation phase only checks whether claim-diff preserves real disagreements.

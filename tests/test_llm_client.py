@@ -1,8 +1,7 @@
 """Tests for the direct-call LLM client (backend/llm_client.py).
 
-llm_client mirrors omniroute.py's query_model/query_models_parallel
-interface but calls Anthropic and Google directly instead of routing
-through the local OmniRoute proxy.
+llm_client calls Anthropic and Google directly - no proxy in front of
+either provider.
 """
 
 import json

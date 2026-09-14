@@ -43,27 +43,23 @@ def test_filter_cases_unknown_id_yields_empty():
 def test_format_report_includes_aggregate_counts_not_percentage():
     report = {
         "total_cases": 2,
-        "new_mechanism_retained_count": 2,
-        "control_retained_count": 1,
+        "new_mechanism_retained_count": 1,
         "cases": [
             {
                 "case_id": "one",
                 "case_source": "synthetic",
                 "new_mechanism": {"retained": True},
-                "control": {"retained": True},
             },
             {
                 "case_id": "two",
                 "case_source": "synthetic",
-                "new_mechanism": {"retained": True},
-                "control": {"retained": False},
+                "new_mechanism": {"retained": False},
             },
         ],
     }
 
     text = run_eval_cli.format_report(report)
 
-    assert "2/2" in text
     assert "1/2" in text
     assert "%" not in text
     assert "one" in text

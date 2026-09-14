@@ -1,13 +1,12 @@
-"""Tests for the validation-phase eval harness (backend/eval_harness.py).
+"""Tests for the eval harness (backend/eval_harness.py).
 
-Runs each fixed eval case through both the claim-diff mechanism and the
-current ranking-and-synthesis pipeline as a control (Success Criterion 1:
-report both counts side by side, not a percentage — the sample is too
-small for a rate to mean anything). All the underlying pipeline pieces
+Runs each fixed eval case through the claim-diff mechanism and reports a
+retention count, not a percentage (Success Criterion 1) — the sample is
+too small for a rate to mean anything. All the underlying pipeline pieces
 (extract_claims, align_claims, classify_compatibility,
-build_ranked_diff_items, synthesize_claim_diff_chairman, stage2/3) are
-already unit-tested elsewhere, so these tests mock them at the boundary
-and check the harness's own orchestration and aggregation.
+build_ranked_diff_items, synthesize_claim_diff_chairman) are already
+unit-tested elsewhere, so these tests mock them at the boundary and check
+the harness's own orchestration and aggregation.
 """
 
 import json
@@ -129,30 +128,6 @@ async def test_run_new_mechanism_agreed_pair_not_passed_as_conflicting():
     assert mock_chairman.call_args.args[1] == [pair]
 
 
-async def test_run_control_builds_stage1_from_fixed_case_responses():
-    case = _sample_case()
-
-    with patch.object(
-        council,
-        "stage2_collect_rankings",
-        new=AsyncMock(return_value=([], {})),
-    ) as mock_stage2, patch.object(
-        council,
-        "stage3_synthesize_final",
-        new=AsyncMock(return_value=_fake_stage_result("control synthesis")),
-    ) as mock_stage3, patch.object(
-        eval_harness, "check_claim_retained", new=AsyncMock(return_value=True)
-    ):
-        result = await eval_harness.run_control(case)
-
-    stage1_arg = mock_stage2.call_args.args[1]
-    assert {r["response"] for r in stage1_arg} == {case["model_a_response"], case["model_b_response"]}
-    assert all(r["status"] == "ok" for r in stage1_arg)
-    assert mock_stage3.call_args.args[1] == stage1_arg
-    assert result["mechanism"] == "control"
-    assert result["retained"] is True
-
-
 async def test_run_eval_harness_aggregates_counts_not_percentages():
     case1 = _sample_case(id="case-1")
     case2 = _sample_case(id="case-2")
@@ -160,17 +135,13 @@ async def test_run_eval_harness_aggregates_counts_not_percentages():
     async def fake_new_mechanism(case):
         return {"mechanism": "claim_diff", "retained": case["id"] == "case-1", "chairman_output": "x"}
 
-    async def fake_control(case):
-        return {"mechanism": "control", "retained": False, "chairman_output": "y"}
-
     with patch.object(
         eval_harness, "run_new_mechanism", new=AsyncMock(side_effect=fake_new_mechanism)
-    ), patch.object(eval_harness, "run_control", new=AsyncMock(side_effect=fake_control)):
+    ):
         report = await eval_harness.run_eval_harness([case1, case2])
 
     assert report["total_cases"] == 2
     assert report["new_mechanism_retained_count"] == 1
-    assert report["control_retained_count"] == 0
     assert len(report["cases"]) == 2
 
 

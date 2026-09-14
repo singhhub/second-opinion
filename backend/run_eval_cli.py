@@ -63,15 +63,12 @@ def format_report(report: Dict[str, Any]) -> str:
     total = report["total_cases"]
     lines = [
         f"Eval cases: {total}",
-        f"Retained -- new mechanism: {report['new_mechanism_retained_count']}/{total}"
-        f"   control: {report['control_retained_count']}/{total}",
+        f"Retained: {report['new_mechanism_retained_count']}/{total}",
         "",
     ]
     for case in report["cases"]:
         new_r = "RETAINED" if case["new_mechanism"]["retained"] else "lost"
-        ctrl_r = "RETAINED" if case["control"]["retained"] else "lost"
-        lines.append(f"[{case['case_source']}] {case['case_id']}")
-        lines.append(f"  new mechanism: {new_r}    control: {ctrl_r}")
+        lines.append(f"[{case['case_source']}] {case['case_id']}: {new_r}")
     return "\n".join(lines)
 
 

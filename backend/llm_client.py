@@ -1,9 +1,9 @@
-"""Direct-call LLM client for Anthropic and Google (no OmniRoute proxy).
+"""Direct-call LLM client for Anthropic and Google.
 
-Mirrors omniroute.py's query_model/query_models_parallel interface so
-council.py can switch between the two clients without changing call sites.
-Real medical text must never route through the third-party OmniRoute
-proxy — see the design doc's data-hygiene constraint.
+Real medical text must never route through a third-party proxy — see the
+design doc's data-hygiene constraint. council.py and claim_diff.py call
+query_model()/query_models_parallel()/embed_text() directly against the
+providers' own APIs.
 """
 
 import asyncio
