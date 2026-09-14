@@ -169,7 +169,7 @@ def _parse_claims(raw: Optional[Dict[str, Any]]) -> Optional[List[Claim]]:
     if raw is None or not raw.get("content"):
         return None
     try:
-        data = json.loads(raw["content"])
+        data = json.loads(llm_client.strip_json_fence(raw["content"]))
         parsed = _ClaimList(claims=data)
     except (json.JSONDecodeError, ValidationError, TypeError):
         return None

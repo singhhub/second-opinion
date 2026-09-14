@@ -49,6 +49,30 @@ async def test_extract_claims_parses_valid_json_on_first_try():
     ]
 
 
+async def test_extract_claims_tolerates_markdown_json_fence_on_first_try():
+    # Live run (2026-09-13) found Claude wraps its extraction output in
+    # ```json fences at least some of the time. Before this was fixed,
+    # both retry attempts hit the same fenced response and the whole
+    # extraction silently fell back to one giant raw-assertion claim
+    # (the entire original response text) instead of real per-claim
+    # extraction - collapsing everything downstream (alignment,
+    # classification, the chairman's summary) into a useless single blob.
+    fenced_json = "```json\n" + json.dumps(
+        [{"text": "You should call 911 immediately", "claim_type": "recommendation"}]
+    ) + "\n```"
+    with patch.object(
+        claim_diff.llm_client,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response(fenced_json)),
+    ) as mock_query:
+        claims = await claim_diff.extract_claims("some response text")
+
+    assert mock_query.await_count == 1
+    assert claims == [
+        Claim(text="You should call 911 immediately", claim_type=ClaimType.RECOMMENDATION)
+    ]
+
+
 async def test_extract_claims_retries_once_then_succeeds():
     responses = [
         _fake_response("not valid json at all"),

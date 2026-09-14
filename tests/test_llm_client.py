@@ -5,6 +5,7 @@ interface but calls Anthropic and Google directly instead of routing
 through the local OmniRoute proxy.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -412,3 +413,28 @@ async def test_embed_text_custom_model_used_in_url_and_cache_key(tmp_path):
         await llm_client.embed_text("some text")
 
     assert mock_post_again.await_count == 1
+
+
+def test_strip_json_fence_no_fence_returns_unchanged():
+    text = '{"a": 1}'
+    result = llm_client.strip_json_fence(text)
+    assert result == '{"a": 1}'
+    assert json.loads(result) == {"a": 1}
+
+
+def test_strip_json_fence_strips_json_language_tagged_fence():
+    text = '```json\n{"a": 1}\n```'
+    result = llm_client.strip_json_fence(text)
+    assert json.loads(result) == {"a": 1}
+
+
+def test_strip_json_fence_strips_bare_fence_without_language_tag():
+    text = '```\n{"a": 1}\n```'
+    result = llm_client.strip_json_fence(text)
+    assert json.loads(result) == {"a": 1}
+
+
+def test_strip_json_fence_handles_surrounding_whitespace():
+    text = '  \n```json\n{"a": 1}\n```\n  '
+    result = llm_client.strip_json_fence(text)
+    assert json.loads(result) == {"a": 1}

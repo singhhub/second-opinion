@@ -346,31 +346,6 @@ async def test_regression_stage3_prompt_names_the_failed_model_explicitly():
     assert failing_model in sent_prompt
 
 
-def test_strip_json_fence_no_fence_returns_unchanged():
-    text = '{"a": 1}'
-    result = council._strip_json_fence(text)
-    assert result == '{"a": 1}'
-    assert json.loads(result) == {"a": 1}
-
-
-def test_strip_json_fence_strips_json_language_tagged_fence():
-    text = '```json\n{"a": 1}\n```'
-    result = council._strip_json_fence(text)
-    assert json.loads(result) == {"a": 1}
-
-
-def test_strip_json_fence_strips_bare_fence_without_language_tag():
-    text = '```\n{"a": 1}\n```'
-    result = council._strip_json_fence(text)
-    assert json.loads(result) == {"a": 1}
-
-
-def test_strip_json_fence_handles_surrounding_whitespace():
-    text = '  \n```json\n{"a": 1}\n```\n  '
-    result = council._strip_json_fence(text)
-    assert json.loads(result) == {"a": 1}
-
-
 def test_chairman_summary_models_accept_full_shape():
     from backend.council import ChairmanSummary, ObservationGroup
 

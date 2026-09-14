@@ -47,6 +47,29 @@ def cache_key(*parts: str) -> str:
     return hashlib.sha256("||".join(parts).encode("utf-8")).hexdigest()
 
 
+def strip_json_fence(text: str) -> str:
+    """
+    Strip a leading/trailing markdown code fence from a model response, if
+    present. Both Gemini and Claude have been observed wrapping JSON output
+    in ```json ... ``` fences despite prompt instructions not to - and since
+    a retry re-sends identical messages, a model with a deterministic
+    fencing habit would otherwise fail every attempt, every time. Shared by
+    every module that asks a model for bare JSON (council.py's chairman,
+    claim_diff.py's extractor). Pure string transformation - no-op when
+    there's no fence.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    first_fence_end = stripped.find("\n")
+    last_fence_start = stripped.rfind("```")
+    if first_fence_end == -1 or last_fence_start <= 0:
+        return stripped
+
+    return stripped[first_fence_end + 1:last_fence_start].strip()
+
+
 def cache_read(key: str) -> Optional[Any]:
     path = CACHE_DIR / f"{key}.json"
     if not path.exists():
