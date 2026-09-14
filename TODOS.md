@@ -27,6 +27,43 @@ it should not sit."
 **Priority:** P2
 **Depends on:** None — can happen anytime.
 
+### Chairman can bury an emergency-recommendation disagreement as "format"
+
+**What:** A live test run (2026-09-13/14, question: 81yo woman, blurry left
+vision + left headache, history of AFib/MV regurgitation/COPD) surfaced a
+real retention gap. Gemini explicitly said "this is a medical emergency...
+call 911 or go to the ER immediately"; Claude listed the same red-flag
+differentials (Giant Cell Arteritis, stroke/TIA, angle-closure glaucoma) as
+a clinical workup checklist and never made that emergency recommendation.
+The chairman's actual output characterized this as the two models
+differing "in format and target audience" — it never named the real
+disagreement (one model gave an explicit emergency recommendation, the
+other didn't). Captured as eval case
+`synthetic-visual-symptoms-elderly-emergency-framing-gap` in
+`data/eval/synthetic_cases.json` (gitignored, local only).
+
+**Why:** This is exactly the failure mode Success Criterion 1 exists to
+catch — a real, high-stakes disagreement (whether to treat this as an
+emergency) getting smoothed into a vague, low-signal description instead
+of being named explicitly. Root cause is likely in Step 1 (extraction) or
+Step 3 (compatibility classification): Gemini's "call 911 immediately" is a
+`recommendation`-type claim that either isn't being extracted distinctly
+from the surrounding assertion claims, or is being aligned/classified in a
+way that loses its specific content when the chairman writes the
+conflicting-claims summary.
+
+**Context:** Run this case (and similar ones) through `run_eval_harness`
+with `LLM_CLIENT_VERBOSE=1` to inspect exactly which claims were extracted
+from each model's response and how they were aligned/classified, before
+deciding whether to adjust the extraction prompt, the compatibility
+prompt, or the chairman prompt's instructions for how to describe a
+disagreement.
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** None — can start anytime; this is exactly what the
+validation phase's eval set is for.
+
 ### Build phase — full Postgres+pgvector data model and retrieval
 
 **What:** Build the full spec (`docs/superpowers/specs/2026-08-23-medical-rag-design.md`),
