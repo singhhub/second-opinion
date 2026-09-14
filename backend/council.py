@@ -22,11 +22,21 @@ class ChairmanSummary(BaseModel):
 
 
 CHAIRMAN_NEVER_EMERGENCY_RULE = (
-    "You must NEVER state or imply whether this is or is not a medical "
-    "emergency, and must NEVER tell the user to go to the ER or that it's "
-    "safe not to - that call belongs to the user and their doctor, not you. "
-    "You may name specific observations, symptoms, or red flags worth "
-    "checking - never the verdict itself."
+    "You must NEVER, in your own voice, state or imply whether this is or "
+    "is not a medical emergency, and must NEVER tell the user to go to the "
+    "ER or that it's safe not to - that call belongs to the user and their "
+    "doctor, not you.\n\n"
+    "This is different from reporting what a source model said. If one "
+    "model explicitly recommended immediate ER/emergency care and the "
+    "other did not make that recommendation, that IS the disagreement this "
+    "summary exists to preserve - name it explicitly (e.g. 'Model A "
+    "recommended immediate ER care; Model B did not make that "
+    "recommendation') rather than omitting it because it mentions an "
+    "emergency. Do not soften, hedge, or drop a source model's own "
+    "recommendation out of caution about the never-emergency-verdict rule "
+    "above - that rule binds your own voice only, never what you report "
+    "about the source models. You may always name specific observations, "
+    "symptoms, or red flags worth checking."
 )
 
 

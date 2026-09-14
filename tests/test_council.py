@@ -169,6 +169,30 @@ async def test_chairman_system_prompt_includes_never_emergency_rule():
     assert "emergency" in sent_system_prompt.lower()
 
 
+async def test_chairman_system_prompt_distinguishes_own_verdict_from_reporting_a_source_recommendation():
+    """
+    Live run (2026-09-14) found the chairman omitting a real disagreement
+    entirely: one model explicitly recommended immediate ER/911 care
+    (correctly ranked near the top of its UNCONFIRMED input), the other
+    didn't, and the chairman's summary never mentioned either fact - likely
+    over-applying the never-emergency-verdict rule to reporting what a
+    SOURCE model said, not just to issuing its own verdict. The rule must
+    explicitly distinguish the two.
+    """
+    with patch.object(
+        council,
+        "query_model",
+        new=AsyncMock(return_value=_fake_response('{"agreed_findings": "", "disagreement_summary": "", "observations": [], "questions_for_doctor": []}')),
+    ) as mock_query:
+        await council.synthesize_claim_diff_chairman("is this an emergency?", [], [])
+
+    sent_system_prompt = mock_query.call_args.args[1][0]["content"]
+    # The rule must clearly separate "your own voice" from "what a source model said".
+    assert "own voice" in sent_system_prompt.lower() or "own verdict" in sent_system_prompt.lower()
+    # It must instruct naming it, not omitting it, when only one model recommended emergency care.
+    assert "did not make that recommendation" in sent_system_prompt.lower() or "name it explicitly" in sent_system_prompt.lower()
+
+
 async def test_chairman_valid_json_parses_into_structured_summary():
     valid_json = json.dumps({
         "agreed_findings": "both models agree on X",
