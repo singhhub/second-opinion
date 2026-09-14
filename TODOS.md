@@ -2,6 +2,31 @@
 
 ## Second Opinion (medical RAG extension)
 
+### Extract a shared claim-diff pipeline function (dedupe main.py / eval_harness.py)
+
+**What:** `backend/main.py`'s `analyze_question` endpoint and
+`backend/eval_harness.py`'s `run_new_mechanism` now both inline the same
+6-stage pipeline (extract_claims x2 -> align_claims -> classify_compatibility
+per pair -> build_ranked_diff_items -> synthesize_claim_diff_chairman).
+Extract a shared `async def run_claim_diff_pipeline(question, response_a,
+response_b) -> (agreed, conflicting, alignment, diff_items)` into
+`claim_diff.py` or `council.py` and call it from both.
+
+**Why:** Flagged by the final whole-branch review on the live-data-result-
+screen plan (2026-09-13). The eval harness exists specifically to measure
+the mechanism users actually get — a future change to one copy (a filter, a
+threshold, a re-ranking) would silently diverge eval results from
+production behavior, with no test that would notice.
+
+**Context:** Explicitly deferred out of that plan's fix wave (a refactor
+touching two files is out of scope for a single fix pass) — reviewer called
+it "acceptable as an immediate fast-follow rather than a merge blocker, but
+it should not sit."
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None — can happen anytime.
+
 ### Build phase — full Postgres+pgvector data model and retrieval
 
 **What:** Build the full spec (`docs/superpowers/specs/2026-08-23-medical-rag-design.md`),
