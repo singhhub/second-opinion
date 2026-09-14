@@ -178,10 +178,14 @@ Key routing rules:
 - Architecture → invoke /plan-eng-review
 - Design system/plan review → invoke /design-consultation or /plan-design-review
 - Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
+- Bugs/errors → invoke superpowers:systematic-debugging first (root-cause before any fix), or /investigate for a live-site QA angle
+- Multi-step implementation plans → invoke superpowers:writing-plans, then superpowers:subagent-driven-development (or superpowers:executing-plans) to execute
+- New features/behavior changes → invoke superpowers:brainstorming before any implementation
+- Any code change → follow superpowers:test-driven-development (failing test first, watch it fail, then implement)
 - QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
+- Code review/diff check → invoke /review, or superpowers:requesting-code-review for a plan/branch-scoped review
 - Visual polish → invoke /design-review
 - Ship/deploy/PR → invoke /ship or /land-and-deploy
+- Finishing a feature branch → invoke superpowers:finishing-a-development-branch
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
