@@ -3,6 +3,20 @@
 **Date:** 2026-09-17
 **Status:** Approved (design), not yet built
 
+**Amendment (2026-09-20):** the original approval gate ("every wiki write
+requires human approval, no exceptions") assumed the reviewer could judge
+medical correctness. The actual reviewer is a non-clinician sibling, who
+can verify "does this match the source document" but not "is this
+medically right." Revised to a **tiered gate**: `allergies.md`,
+`medications.md`, and any contradiction always block on a human
+confirming the diff matches its source (never a clinical judgment call);
+everything else auto-applies with full logging, relying on the lint
+routine as the after-the-fact check for the lower-stakes pages. A
+contradiction is queued as a `questions_for_doctor.md` entry rather than
+something the sibling resolves themselves — the same pattern the
+claim-diff chairman already uses. See "Non-negotiable safety/compliance
+requirements" and the updated architecture diagram below.
+
 **Relationship to the existing medical-RAG spec** (`2026-08-23-medical-rag-design.md`,
 amended 2026-09-11): this document **replaces that spec's retrieval
 strategy entirely**, and supersedes it as the design for the build phase.
@@ -36,8 +50,11 @@ See "Deferred" below; this is carried over unchanged from the old spec.
 
 ## Scope for this build
 
-1. **Ingestion** — raw source in, LLM-proposed diff out, nothing written
-   until a human approves it.
+1. **Ingestion** — raw source in, LLM-proposed diff out. **Tiered
+   approval, not a universal gate** (revised 2026-09-20 — see decision
+   note below): a diff touching `allergies.md`, `medications.md`, or
+   flagged as a contradiction always blocks on a human confirmation
+   before applying; every other diff auto-applies with full logging.
 2. **Query** — full wiki (verbatim critical pages + everything else) fed
    into the existing claim-diff mechanism (`backend/council.py`,
    `backend/claim_diff.py`), patient-scoped. The query and its answer
@@ -49,8 +66,10 @@ See "Deferred" below; this is carried over unchanged from the old spec.
 **Deferred, unchanged from the old spec:** real authentication, encryption
 at rest, a BAA-covered provider. Every table below gets an `actor_id`
 column so a real identity can slot in later without reshaping anything —
-until then, everything writes a single constant
-(`backend.config.DEFAULT_ACTOR_ID = "local-operator"`).
+until then, human-confirmed writes use one constant
+(`backend.config.DEFAULT_ACTOR_ID = "local-operator"`) and auto-applied
+writes use a distinct one (`backend.config.AUTO_APPLY_ACTOR_ID =
+"system-auto"`), so the audit log can always tell the two apart.
 
 ## Constraints
 
@@ -90,14 +109,31 @@ needed. Flags contradiction with existing wiki content explicitly rather
 than silently overwriting.
     │
     ▼
-pending_diffs row written (status=pending) — NO file in wiki/ touched yet
+pending_diffs row written — NO file in wiki/ touched yet.
+requires_approval = page is allergies.md/medications.md OR contradiction_flag
     │
-    ▼
-Human reviews on the wiki-review page → approve or reject
+    ├─ requires_approval = false ─────────────────────────┐
+    │                                                       ▼
+    │                              Auto-apply immediately: apply diff →
+    │                              update index.md → append log.md →
+    │                              git commit → audit_log row
+    │                              (actor_id = AUTO_APPLY_ACTOR_ID)
     │
-    ▼ (approved)
-Apply diff to the .md file → update index.md → append log.md line →
-git commit → approvals row + audit_log row written
+    └─ requires_approval = true
+            │
+            ▼
+       If contradiction_flag: also append an entry to
+       wiki/questions_for_doctor.md immediately (additive, not gated —
+       it's a note to raise at the next appointment, not a fact change)
+            │
+            ▼
+       Human reviews on the wiki-review page, asked only "does this
+       match the source document?" — never a medical judgment
+            │
+            ▼ (confirmed)
+       Apply diff to the .md file → update index.md → append log.md →
+       git commit → approvals row (actor_id = DEFAULT_ACTOR_ID) +
+       audit_log row written
 
 
 QUERY
@@ -147,6 +183,9 @@ data/patients/<patient_id>/
       cardiac.md, respiratory.md, ...   # created on demand
       archive.md                   # compacted resolved/inactive detail
     log.md                         # append-only: ## [YYYY-MM-DD] ingest | source-id
+    questions_for_doctor.md        # append-only: unresolved contradictions,
+                                    # queued to raise at the next appointment —
+                                    # never resolved by the sibling themselves
 ```
 
 ### SQLite (`data/patients.db`) — metadata, approvals, audit, lint
@@ -179,15 +218,16 @@ CREATE TABLE pending_diffs (
     diff_content TEXT NOT NULL,       -- unified diff / before-after text
     contradiction_flag INTEGER NOT NULL DEFAULT 0,
     contradiction_note TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    requires_approval INTEGER NOT NULL,  -- page_path in {allergies.md, medications.md} OR contradiction_flag
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected | auto_applied
     proposed_at TEXT NOT NULL
 );
 
 CREATE TABLE approvals (
     id TEXT PRIMARY KEY,
     diff_id TEXT NOT NULL REFERENCES pending_diffs(id),
-    actor_id TEXT NOT NULL,           -- DEFAULT_ACTOR_ID today
-    decision TEXT NOT NULL,           -- approved | rejected
+    actor_id TEXT NOT NULL,           -- DEFAULT_ACTOR_ID (human) or AUTO_APPLY_ACTOR_ID (system)
+    decision TEXT NOT NULL,           -- approved | rejected | auto_applied
     decided_at TEXT NOT NULL,
     note TEXT
 );
@@ -224,12 +264,12 @@ isn't needed.
 |---|---|
 | `backend/wiki_db.py` | SQLite connection + idempotent schema setup |
 | `backend/wiki_store.py` | Read/write wiki `.md` files and raw source files on disk; patient-scoped path helpers; git commit on approved writes |
-| `backend/wiki_ingest.py` | extract → LLM proposes diff → write `pending_diffs` row (no file writes) |
-| `backend/wiki_review.py` | approve/reject: apply diff to file, update `index.md` + `log.md`, git commit, write `approvals` + `audit_log` |
+| `backend/wiki_ingest.py` | extract → LLM proposes diff → determine `requires_approval` (critical page or contradiction) → write `pending_diffs` row; if a contradiction, also append to `questions_for_doctor.md` immediately; if `requires_approval` is false, calls into `wiki_review.py`'s apply step itself, auto-applying with `AUTO_APPLY_ACTOR_ID` |
+| `backend/wiki_review.py` | apply a diff to file, update `index.md` + `log.md`, git commit, write `approvals` + `audit_log` — shared by both the auto-apply path and the human-confirm path; only the caller and `actor_id` differ |
 | `backend/wiki_query.py` | load full wiki for a patient (verbatim critical pages injected separately), call the existing claim-diff pipeline, write the result as a candidate `pending_diffs` entry |
 | `backend/wiki_lint.py` | the four lint checks, writes `lint_findings` |
 | `backend/main.py` | modified: `/api/second-opinion/analyze` gains `patient_id`; new routes for pending-diffs list/approve/reject, lint-findings list/dismiss, `GET /wiki/review` |
-| `static/wiki-review.html` | new: pending diffs + lint findings, approve/reject/dismiss |
+| `static/wiki-review.html` | new: pending diffs (critical-page/contradiction diffs only — auto-applied ones never appear here) + lint findings, confirm/reject/dismiss. Confirm is framed as "does this match the source document?", never a medical judgment |
 | `static/second-opinion-result.html` | modified: add patient selector |
 
 ## Non-negotiable safety/compliance requirements
@@ -238,9 +278,20 @@ isn't needed.
   `allergies.md` and `medications.md` are loaded and injected as raw text,
   a second time, separately from the general wiki load — never
   re-paraphrased by an intermediate step.
-- **Every wiki write requires explicit human approval** before being
-  committed. No autonomous silent edits to any page, ever — this is not
-  a configurable setting.
+- **`allergies.md`, `medications.md`, and any contradiction always
+  require explicit human confirmation** before being committed — no
+  exceptions, not a configurable setting. That confirmation is scoped to
+  "does this match the source document," never a clinical judgment call,
+  because the reviewer is a non-clinician (see 2026-09-20 amendment
+  above). Everything else auto-applies, on the reasoning that a routine,
+  non-critical page being briefly wrong-then-caught-by-lint is a much
+  smaller risk than every update depending on a human who isn't
+  qualified to catch a clinically wrong one.
+- **A contradiction is never resolved by the reviewer.** It's queued in
+  `questions_for_doctor.md` and blocks the affected page from updating
+  until a human confirms the diff matches its source — the actual
+  clinical question (which claim is true) goes to the doctor, same
+  pattern as the claim-diff chairman's `questions_for_doctor` field.
 - **Provenance on every claim.** Every wiki statement should be traceable
   to the `source_id`/date it came from (`pending_diffs.source_id` →
   `raw_sources`, preserved permanently even after the diff is applied, via
@@ -264,8 +315,16 @@ isn't needed.
   and a note that it needs manual handling — a raw source is never
   silently dropped just because the LLM couldn't propose a diff for it.
 - Contradiction detected → `contradiction_flag=1` always requires
-  explicit approval; there is no path, auto or otherwise, that applies a
-  contradicting diff without a human seeing the flag.
+  explicit human confirmation before the page updates; there is no
+  auto-apply path for a contradicting diff. The `questions_for_doctor.md`
+  entry itself is written immediately regardless (additive, not a fact
+  change), so the question is never lost even if the diff sits pending.
+- Diff proposed for a non-critical page, no contradiction → auto-applies
+  immediately; if the auto-apply step itself fails partway (file write
+  succeeds, git commit fails, or vice versa), the diff's `pending_diffs`
+  row stays at its pre-apply status rather than being marked
+  `auto_applied` on a partial success — surfaced by the lint routine's
+  orphaned-source check rather than silently lost.
 - Query for a patient with no wiki pages yet → a clear "no records for
   this patient yet" response, same pattern as the old spec's empty-corpus
   rule — never an empty/silent council run.
@@ -315,8 +374,14 @@ per pharmacist note.
    `allergies.md`/`medications.md`, not a paraphrase or summary of it.
 2. **Contradiction never silently overwritten**: a fixture source that
    conflicts with existing wiki content must produce
-   `contradiction_flag=1` and must never reach `status='approved'`
-   without an explicit approval call.
+   `contradiction_flag=1`, `requires_approval=1`, a `questions_for_doctor.md`
+   entry, and must never reach `status='approved'`/`'auto_applied'`
+   without an explicit confirm call.
+2a. **Tiering is correct and can't be bypassed**: a fixture diff on
+    `allergies.md` or `medications.md` always produces
+    `requires_approval=1` regardless of contradiction status; a fixture
+    diff on any other page with no contradiction always auto-applies
+    without waiting on a confirm call.
 3. **Patient isolation**: every SQLite query and file path scoped by
    `patient_id` — a query for patient A must never load or return
    patient B's wiki content, raw sources, or pending diffs, under any
@@ -336,12 +401,16 @@ independently testable:
 
 1. **Storage foundation** — `wiki_db.py` schema, `wiki_store.py` file
    helpers, no LLM calls yet. Testable with fixture files alone.
-2. **Ingest, ending at `pending_diffs`** — `wiki_ingest.py` (extraction +
-   diff proposal), stops before any approval/write-back exists yet.
-   Testable by inspecting the SQLite row a fixture source produces.
-3. **Review + approval** — `wiki_review.py`, the `wiki-review.html` page,
-   and the approve/reject/list endpoints. Closes the ingest loop:
-   fixture source → proposed diff → approved → file actually changes.
+2. **Ingest + auto-apply path** — `wiki_ingest.py` (extraction, diff
+   proposal, tiering) and `wiki_review.py`'s shared apply-a-diff
+   primitive, exercised only via the non-critical/no-contradiction path.
+   Closes the loop for the common case: fixture source on a non-critical
+   page → auto-applied → file/`index.md`/`log.md` actually change, no UI
+   needed yet.
+3. **Human-confirm path** — the `wiki-review.html` page and the
+   confirm/reject/list endpoints, for the critical-page/contradiction
+   diffs phase 2 deliberately left un-applied. Also wires up
+   `questions_for_doctor.md`.
 4. **Query** — `wiki_query.py`, the `patient_id` addition to
    `/api/second-opinion/analyze`, the patient selector on the existing
    `/ui` page. Depends on phase 3 existing (needs real wiki content to
@@ -365,3 +434,15 @@ PR, rather than one large branch.
 - `document_date` capture UX: does the human confirm it during review, or
   does the extraction step attempt to infer it? Either is compatible with
   this schema; not decided here.
+- Whether new-page creation (`is_new_page=1`) should also require
+  confirmation even on a non-critical page — a brand-new condition/system
+  page is a bigger structural change than an edit to an existing one, but
+  wasn't part of the 2026-09-20 tiering decision. Currently falls under
+  "auto-applies if not critical/contradicting," same as any other
+  non-critical diff; revisit if that turns out too permissive in
+  practice.
+- Explicit page-to-page cross-references (e.g. a new condition page
+  linking to the existing `by-system` page it relates to) — raised during
+  a comparison against a similar "compiled wiki" pattern seen elsewhere,
+  not yet adopted into this design. Independent of the approval-tiering
+  question above; still open.
