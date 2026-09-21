@@ -97,3 +97,13 @@ async def test_extract_text_vision_failure_raises_extraction_error():
 async def test_extract_text_unsupported_source_type_raises():
     with pytest.raises(ValueError):
         await wiki_ingest.extract_text(b"data", "docx")
+
+
+async def test_extract_text_malformed_pdf_raises_extraction_error():
+    with pytest.raises(wiki_ingest.ExtractionError):
+        await wiki_ingest.extract_text(b"not a pdf", "pdf")
+
+
+async def test_extract_text_txt_invalid_utf8_raises_extraction_error():
+    with pytest.raises(wiki_ingest.ExtractionError):
+        await wiki_ingest.extract_text(b"\xff\xfe not valid utf-8", "txt")

@@ -41,7 +41,10 @@ async def _extract_image_bytes(image_bytes: bytes, media_type: str, vision_model
 
 
 async def _extract_pdf(file_bytes: bytes, vision_model: str) -> Tuple[str, str]:
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except RuntimeError as e:
+        raise ExtractionError(f"failed to open PDF: {e}")
     try:
         page_texts: List[str] = []
         used_vision = False
@@ -82,7 +85,10 @@ async def extract_text(
     (see wiki_ingest.ingest_source).
     """
     if source_type == "txt":
-        return file_bytes.decode("utf-8"), "local"
+        try:
+            return file_bytes.decode("utf-8"), "local"
+        except UnicodeDecodeError as e:
+            raise ExtractionError(f"txt source is not valid UTF-8: {e}")
 
     if source_type in ("jpg", "png"):
         media_type = "image/jpeg" if source_type == "jpg" else "image/png"
