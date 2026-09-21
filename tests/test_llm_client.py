@@ -4,6 +4,7 @@ llm_client calls Anthropic and Google directly - no proxy in front of
 either provider.
 """
 
+import base64
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -437,3 +438,66 @@ def test_strip_json_fence_handles_surrounding_whitespace():
     text = '  \n```json\n{"a": 1}\n```\n  '
     result = llm_client.strip_json_fence(text)
     assert json.loads(result) == {"a": 1}
+
+
+async def test_query_vision_claude_success():
+    fake_response = _mock_response(
+        {"content": [{"type": "text", "text": "extracted text"}]}
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        result = await llm_client.query_vision(
+            "claude/claude-sonnet-4-5-20250929",
+            b"fake-image-bytes",
+            "image/png",
+            "Transcribe this document.",
+        )
+
+    assert result == {"content": "extracted text", "reasoning_details": None}
+    sent_payload = mock_post.call_args.kwargs["json"]
+    image_block = sent_payload["messages"][0]["content"][0]
+    assert image_block["type"] == "image"
+    assert image_block["source"]["media_type"] == "image/png"
+    assert image_block["source"]["data"] == base64.b64encode(b"fake-image-bytes").decode("ascii")
+
+
+async def test_query_vision_gemini_success():
+    fake_response = _mock_response(
+        {"candidates": [{"content": {"parts": [{"text": "extracted text"}]}}]}
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new=AsyncMock(return_value=fake_response)
+    ) as mock_post:
+        result = await llm_client.query_vision(
+            "gemini/gemini-3.1-pro-preview",
+            b"fake-image-bytes",
+            "image/jpeg",
+            "Transcribe this document.",
+        )
+
+    assert result == {"content": "extracted text", "reasoning_details": None}
+    sent_payload = mock_post.call_args.kwargs["json"]
+    image_part = sent_payload["contents"][0]["parts"][0]
+    assert image_part["inlineData"]["mimeType"] == "image/jpeg"
+    assert image_part["inlineData"]["data"] == base64.b64encode(b"fake-image-bytes").decode("ascii")
+
+
+async def test_query_vision_unknown_provider_returns_none():
+    result = await llm_client.query_vision(
+        "unknown-provider/some-model", b"bytes", "image/png", "prompt"
+    )
+    assert result is None
+
+
+async def test_query_vision_network_error_returns_none():
+    with patch.object(llm_client, "RETRY_BACKOFF_SECONDS", 0), patch.object(
+        httpx.AsyncClient,
+        "post",
+        new=AsyncMock(side_effect=httpx.ConnectTimeout("timed out")),
+    ):
+        result = await llm_client.query_vision(
+            "claude/claude-sonnet-4-5-20250929", b"bytes", "image/png", "prompt"
+        )
+
+    assert result is None

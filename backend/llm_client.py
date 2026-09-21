@@ -7,6 +7,7 @@ providers' own APIs.
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -303,3 +304,114 @@ async def query_models_parallel(
     tasks = [query_model(model, messages) for model in models]
     responses = await asyncio.gather(*tasks)
     return {model: response for model, response in zip(models, responses)}
+
+
+async def _query_claude_vision(
+    model: str, image_base64: str, media_type: str, prompt: str, timeout: float
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": ANTHROPIC_MAX_TOKENS,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": image_base64,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    }
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+
+    data = await _post_json(ANTHROPIC_API_URL, json_payload=payload, timeout=timeout, headers=headers)
+
+    text = "".join(
+        block.get("text", "")
+        for block in data.get("content", [])
+        if block.get("type") == "text"
+    )
+    return {"content": text, "reasoning_details": None}
+
+
+async def _query_gemini_vision(
+    model: str, image_base64: str, media_type: str, prompt: str, timeout: float
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"inlineData": {"mimeType": media_type, "data": image_base64}},
+                    {"text": prompt},
+                ],
+            }
+        ]
+    }
+    url = f"{GOOGLE_API_URL}/{model}:generateContent"
+
+    data = await _post_json(url, json_payload=payload, timeout=timeout, params={"key": GOOGLE_API_KEY})
+
+    parts = data["candidates"][0]["content"]["parts"]
+    text = "".join(part.get("text", "") for part in parts)
+    return {"content": text, "reasoning_details": None}
+
+
+_VISION_PROVIDERS = {
+    "claude": _query_claude_vision,
+    "gemini": _query_gemini_vision,
+}
+
+
+async def query_vision(
+    model: str,
+    image_bytes: bytes,
+    media_type: str,
+    prompt: str,
+    timeout: float = 120.0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Query a single model with an image + text prompt, directly against its
+    provider. Used by wiki_ingest.py's extraction step for scanned PDF
+    pages, JPGs, and PNGs, where no text layer exists to extract locally.
+
+    Args:
+        model: Provider-prefixed model identifier, e.g. "claude/claude-sonnet-4-5-20250929".
+        image_bytes: Raw image bytes (a rendered PNG for a PDF page, or the
+                     original JPG/PNG upload).
+        media_type: MIME type, e.g. "image/png" or "image/jpeg".
+        prompt: Text instruction accompanying the image.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        Response dict with 'content' and 'reasoning_details', or None if failed.
+    """
+    provider, _, model_id = model.partition("/")
+    handler = _VISION_PROVIDERS.get(provider)
+
+    if handler is None:
+        print(f"Error querying model {model}: unknown provider '{provider}'")
+        return None
+
+    image_base64 = base64.b64encode(image_bytes).decode("ascii")
+
+    _log("QUERY_VISION start", model=model, media_type=media_type, prompt_preview=prompt[:200])
+
+    try:
+        result = await handler(model_id, image_base64, media_type, prompt, timeout)
+        _log("QUERY_VISION done", model=model, content_preview=(result.get("content") or "")[:300])
+        return result
+    except Exception as e:
+        print(f"Error querying vision model {model}: {e}")
+        return None
