@@ -55,42 +55,74 @@ def test_commit_wiki_change_respects_patient_isolation(tmp_path):
 
     wiki_store.commit_wiki_change("patient-a", "Add patient-a notes", root=tmp_path)
 
-    # Check that only patient-a is in the commit
-    log = _git(["log", "--name-only", "-1"], tmp_path).stdout
-    assert "patient-a" in log
-    assert "patient-b" not in log
+    # Check what actually got staged/committed. --format= suppresses the commit
+    # message, leaving only the changed file paths, so this can't be satisfied
+    # by the commit message ("Add patient-a notes") incidentally mentioning
+    # "patient-a" - it has to be the real staged files.
+    files = _git(["log", "--name-only", "--format=", "-1"], tmp_path).stdout
+    assert "patient-a" in files
+    assert "patient-b" not in files
 
 
-def test_commit_wiki_change_treats_dash_prefixed_id_as_pathspec(tmp_path):
-    """Verify dash-prefixed patient_id like '-A' is treated as pathspec, not git flag.
+def test_commit_wiki_change_rejects_dash_prefixed_id(tmp_path):
+    """A dash-prefixed patient_id like '-A' must be rejected outright before any
+    git command runs, not treated as a literal pathspec via the '--' separator.
 
-    If '-A' were interpreted as git's -A/--all flag instead of a directory name,
-    the entire repo would be staged. By verifying only the dash-prefixed directory
-    appears in the commit (and not another modified patient directory), we confirm
-    the -- separator correctly prevents flag injection.
+    Earlier rounds of this fix made '-A' work by forcing it through '--' as a
+    literal pathspec. That's a narrower, riskier contract than simply refusing
+    IDs shaped like git flags/pathspec-magic in the first place (see the
+    pathspec-magic-prefix test below for why '--' alone isn't sufficient
+    protection). Rejecting the whole shape up front is the safer contract.
     """
-    # Create files for two patients
+    wiki_store.write_wiki_page("patient-a", "notes.md", "Patient A notes", root=tmp_path)
+
+    with pytest.raises(wiki_store.UnsafePagePathError):
+        wiki_store.commit_wiki_change("-A", "Update dash dir", root=tmp_path)
+
+    # Validation happens before ensure_repo()/git are invoked at all.
+    assert not (tmp_path / ".git").exists()
+
+
+@pytest.mark.parametrize(
+    "magic_patient_id",
+    [":/", ":(glob)**", ":(top)", ":!patient-b"],
+)
+def test_commit_wiki_change_rejects_git_pathspec_magic_prefixes(tmp_path, magic_patient_id):
+    """Git pathspec "magic" prefixes like ':/' or ':(glob)' are not path traversal
+    - they resolve to a normal single-segment child of root, so they'd pass a
+    pure containment check - but git interprets a leading ':' as pathspec magic
+    rather than a literal directory name once it reaches `git add`. ':/' in
+    particular means "match everything from the repo root", which would stage
+    every patient's files into one commit - a cross-patient PHI leak into the
+    audit trail. This must be rejected before any git command runs, and the '--'
+    separator (which only stops flag injection, a different mechanism) does not
+    stop it.
+    """
     wiki_store.write_wiki_page("patient-a", "notes.md", "Patient A notes", root=tmp_path)
     wiki_store.write_wiki_page("patient-b", "notes.md", "Patient B notes", root=tmp_path)
 
-    # Create a directory with literal dash-prefixed name
-    dash_dir = tmp_path / "-A"
-    dash_dir.mkdir(parents=True, exist_ok=True)
-    (dash_dir / "file.txt").write_text("test file")
+    with pytest.raises(wiki_store.UnsafePagePathError):
+        wiki_store.commit_wiki_change(magic_patient_id, "malicious", root=tmp_path)
 
-    # Initialize repo and commit initial state
+    # No repo, no staging, no commit - validation happens before any git call.
+    assert not (tmp_path / ".git").exists()
+
+
+def test_ensure_repo_rejects_a_remote_added_after_creation(tmp_path):
+    """The "no remote" invariant must hold on every call, not just at creation.
+
+    Something (a bug, a misconfigured tool, a future change) could add a
+    remote to this repo after it's first created. Since no PHI may ever leave
+    this machine, ensure_repo() must catch that on the very next call, not
+    only check for it once up front.
+    """
     wiki_store.ensure_repo(tmp_path)
-    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "Initial"], cwd=tmp_path, check=True)
 
-    # Modify both the dash-dir and patient-a
-    (dash_dir / "file.txt").write_text("modified")
-    wiki_store.write_wiki_page("patient-a", "notes.md", "Updated notes", root=tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.invalid/not-a-real-remote.git"],
+        cwd=tmp_path,
+        check=True,
+    )
 
-    # Commit only the dash directory using commit_wiki_change with patient_id="-A"
-    wiki_store.commit_wiki_change("-A", "Update dash dir", root=tmp_path)
-
-    # Verify only -A is in the commit, not patient-a (which would be if -A was a flag)
-    log = _git(["log", "--name-only", "-1"], tmp_path).stdout
-    assert "-A" in log
-    assert "patient-a" not in log
+    with pytest.raises(wiki_store.WikiRemoteConfiguredError):
+        wiki_store.ensure_repo(tmp_path)

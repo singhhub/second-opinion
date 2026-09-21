@@ -6,22 +6,47 @@ directory gets its own separate, remote-less git repo rather than being
 tracked by the project's own.
 """
 
+import re
 import subprocess
 from pathlib import Path
 from typing import List, Optional
 
 PATIENTS_ROOT = Path("data/patients")
 
+# Strict allowlist for patient_id/source_id: must start with an alphanumeric
+# character, followed by alphanumerics, underscore, dot, or hyphen. This is
+# checked before any filesystem resolution, and it exists for more than
+# ordinary path traversal (which the containment check below already catches):
+# strings like ":/" or ":(glob)**" resolve to a normal single-segment child of
+# root, so they pass containment, but git interprets a leading ":" as pathspec
+# magic rather than a literal path once the ID reaches `git add`. Rejecting
+# the whole shape up front is simpler and safer than trying to make git accept
+# it literally.
+_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
 
 class UnsafePagePathError(ValueError):
     """Raised when a path component would resolve outside its containment directory."""
 
 
+class WikiRemoteConfiguredError(RuntimeError):
+    """Raised if the patient wiki's local audit-trail repo ever has a remote configured.
+
+    No PHI may ever leave this machine, so this is checked on every call to
+    ensure_repo(), not just at repo creation.
+    """
+
+
 def _validate_safe_id(root: Path, id_value: str, id_name: str) -> None:
     """
-    Validate that an ID (patient_id, source_id) doesn't escape root when joined.
-    Raises UnsafePagePathError if the ID contains path traversal sequences.
+    Validate that an ID (patient_id, source_id) doesn't escape root when joined,
+    and that its character set is safe. Raises UnsafePagePathError if the ID
+    contains path traversal sequences, or doesn't match the strict character
+    allowlist (checked first, before any filesystem resolution, to fail fast on
+    an obviously-unsafe shape).
     """
+    if not _SAFE_ID.match(id_value):
+        raise UnsafePagePathError(f"{id_name} {id_value!r} contains disallowed characters")
     root_resolved = root.resolve()
     resolved = (root / id_value).resolve()
     if resolved.parent != root_resolved:
@@ -56,9 +81,13 @@ def _resolve_safe_page_path(patient_id: str, page_path: str, root: Path = PATIEN
 
 def write_raw_source(patient_id: str, source_id: str, text: str, root: Path = PATIENTS_ROOT) -> Path:
     target_dir = raw_dir(patient_id, root)
-    _validate_safe_id(target_dir, source_id, "source_id")
+    # Validate the exact filename we're about to write, not source_id alone -
+    # the ".txt" suffix changes what gets resolved, so validating source_id
+    # by itself would check a different path than the one actually written.
+    filename = f"{source_id}.txt"
+    _validate_safe_id(target_dir, filename, "source_id")
     target_dir.mkdir(parents=True, exist_ok=True)
-    path = target_dir / f"{source_id}.txt"
+    path = target_dir / filename
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -93,6 +122,11 @@ def ensure_repo(root: Path = PATIENTS_ROOT) -> None:
     exist. Never configures a remote - this repo's only job is a local
     audit trail for PHI that must never leave this machine. A fixed
     local identity avoids depending on global git config being set up.
+
+    Also asserts, on EVERY call (not just when the repo is first created),
+    that no remote has been configured. "No remote" is the single most
+    safety-critical property in this module - it must hold continuously,
+    not just at creation time, in case something added one in between calls.
     """
     root.mkdir(parents=True, exist_ok=True)
     if not (root / ".git").exists():
@@ -100,10 +134,21 @@ def ensure_repo(root: Path = PATIENTS_ROOT) -> None:
         subprocess.run(["git", "config", "user.name", "second-opinion-wiki"], cwd=root, check=True)
         subprocess.run(["git", "config", "user.email", "wiki@localhost"], cwd=root, check=True)
 
+    remotes = subprocess.run(
+        ["git", "remote"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout
+    if remotes.strip():
+        raise WikiRemoteConfiguredError(
+            f"patient wiki repo at {root} has a remote configured "
+            f"({remotes.strip()!r}) - PHI must never leave this machine"
+        )
+
 
 def commit_wiki_change(patient_id: str, message: str, root: Path = PATIENTS_ROOT) -> None:
-    # Validate patient_id for path traversal. Use '--' separator to ensure patient_id
-    # is always treated as a pathspec, never as a git flag (e.g., "-A" or "--all").
+    # Validate patient_id (path traversal, and disallowed characters such as a
+    # leading "-" or ":" that could be misread as a git flag or pathspec magic)
+    # before any git command runs. Also use '--' below so patient_id is always
+    # treated as a pathspec argument, never as a flag, as defense in depth.
     patient_dir(patient_id, root)
     ensure_repo(root)
     subprocess.run(["git", "add", "--", patient_id], cwd=root, check=True)
