@@ -6,13 +6,15 @@ module - nothing here ever writes under a patient's wiki/ directory.
 """
 
 import json
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ValidationError
 
 import fitz  # PyMuPDF
 
-from . import llm_client
+from . import llm_client, wiki_db, wiki_store
 
 DEFAULT_VISION_MODEL = "claude/claude-sonnet-4-5-20250929"
 
@@ -202,3 +204,75 @@ async def propose_diff(
         contradiction=False,
         contradiction_note=None,
     )
+
+
+TIERED_APPROVAL_PAGES = {"allergies.md", "medications.md"}
+
+
+def _requires_approval(page_path: str, contradiction: bool) -> bool:
+    """
+    Tiered approval (design doc, amended 2026-09-20): allergies,
+    medications, any contradiction, and the needs-review fallback page
+    always require a human to confirm the diff against its source before
+    it can be applied. This is a fixed rule in code - safety-critical
+    tiering must never be the model's own judgment call.
+    """
+    return (
+        page_path in TIERED_APPROVAL_PAGES
+        or page_path == NEEDS_REVIEW_PAGE_PATH
+        or contradiction
+    )
+
+
+async def ingest_source(
+    patient_id: str,
+    source_type: str,
+    file_bytes: Optional[bytes] = None,
+    note_text: Optional[str] = None,
+    filename: Optional[str] = None,
+    document_date: Optional[str] = None,
+    vision_model: str = DEFAULT_VISION_MODEL,
+    diff_model: str = DEFAULT_DIFF_MODEL,
+    db_path: Path = wiki_db.DB_PATH,
+    patients_root: Path = wiki_store.PATIENTS_ROOT,
+) -> str:
+    """
+    Full ingest pipeline for one source: extract text, write the
+    raw_sources row + extracted text file, ask an LLM to propose a wiki
+    diff, and write the pending_diffs row. Never writes to wiki/ - that
+    only happens once a human approves the diff (wiki_review.py, Phase 3).
+
+    Returns the new pending_diffs row's id.
+    """
+    if source_type == "note":
+        if note_text is None:
+            raise ValueError("note_text is required when source_type is 'note'")
+        text, extraction_method = note_text, "manual"
+    else:
+        if file_bytes is None:
+            raise ValueError(f"file_bytes is required when source_type is {source_type!r}")
+        text, extraction_method = await extract_text(file_bytes, source_type, vision_model)
+
+    source_id = uuid.uuid4().hex
+    extracted_path = wiki_store.write_raw_source(patient_id, source_id, text, root=patients_root)
+    wiki_db.create_raw_source(
+        source_id, patient_id, filename, source_type, extraction_method,
+        str(extracted_path), document_date, db_path=db_path,
+    )
+
+    existing_pages = {
+        page_path: wiki_store.read_wiki_page(patient_id, page_path, root=patients_root) or ""
+        for page_path in wiki_store.list_wiki_pages(patient_id, root=patients_root)
+    }
+    proposed = await propose_diff(text, existing_pages, model=diff_model)
+    requires_approval = _requires_approval(proposed.page_path, proposed.contradiction)
+
+    diff_id = wiki_db.create_pending_diff(
+        patient_id, source_id, proposed.page_path, proposed.is_new_page,
+        proposed.new_page_content, proposed.contradiction,
+        proposed.contradiction_note, requires_approval, db_path=db_path,
+    )
+
+    wiki_db.update_raw_source_status(source_id, "ingested", db_path=db_path)
+
+    return diff_id
