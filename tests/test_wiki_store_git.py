@@ -59,3 +59,38 @@ def test_commit_wiki_change_respects_patient_isolation(tmp_path):
     log = _git(["log", "--name-only", "-1"], tmp_path).stdout
     assert "patient-a" in log
     assert "patient-b" not in log
+
+
+def test_commit_wiki_change_treats_dash_prefixed_id_as_pathspec(tmp_path):
+    """Verify dash-prefixed patient_id like '-A' is treated as pathspec, not git flag.
+
+    If '-A' were interpreted as git's -A/--all flag instead of a directory name,
+    the entire repo would be staged. By verifying only the dash-prefixed directory
+    appears in the commit (and not another modified patient directory), we confirm
+    the -- separator correctly prevents flag injection.
+    """
+    # Create files for two patients
+    wiki_store.write_wiki_page("patient-a", "notes.md", "Patient A notes", root=tmp_path)
+    wiki_store.write_wiki_page("patient-b", "notes.md", "Patient B notes", root=tmp_path)
+
+    # Create a directory with literal dash-prefixed name
+    dash_dir = tmp_path / "-A"
+    dash_dir.mkdir(parents=True, exist_ok=True)
+    (dash_dir / "file.txt").write_text("test file")
+
+    # Initialize repo and commit initial state
+    wiki_store.ensure_repo(tmp_path)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=tmp_path, check=True)
+
+    # Modify both the dash-dir and patient-a
+    (dash_dir / "file.txt").write_text("modified")
+    wiki_store.write_wiki_page("patient-a", "notes.md", "Updated notes", root=tmp_path)
+
+    # Commit only the dash directory using commit_wiki_change with patient_id="-A"
+    wiki_store.commit_wiki_change("-A", "Update dash dir", root=tmp_path)
+
+    # Verify only -A is in the commit, not patient-a (which would be if -A was a flag)
+    log = _git(["log", "--name-only", "-1"], tmp_path).stdout
+    assert "-A" in log
+    assert "patient-a" not in log
