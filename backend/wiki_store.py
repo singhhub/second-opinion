@@ -6,6 +6,7 @@ directory gets its own separate, remote-less git repo rather than being
 tracked by the project's own.
 """
 
+import subprocess
 from pathlib import Path
 from typing import List, Optional
 
@@ -84,3 +85,23 @@ def list_wiki_pages(patient_id: str, root: Path = PATIENTS_ROOT) -> List[str]:
         str(p.relative_to(base)).replace("\\", "/")
         for p in base.rglob("*.md")
     )
+
+
+def ensure_repo(root: Path = PATIENTS_ROOT) -> None:
+    """
+    Idempotently git-init a repo scoped to root, if one doesn't already
+    exist. Never configures a remote - this repo's only job is a local
+    audit trail for PHI that must never leave this machine. A fixed
+    local identity avoids depending on global git config being set up.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    if not (root / ".git").exists():
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "second-opinion-wiki"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "wiki@localhost"], cwd=root, check=True)
+
+
+def commit_wiki_change(patient_id: str, message: str, root: Path = PATIENTS_ROOT) -> None:
+    ensure_repo(root)
+    subprocess.run(["git", "add", patient_id], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=root, check=True)
