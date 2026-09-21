@@ -13,10 +13,21 @@ PATIENTS_ROOT = Path("data/patients")
 
 
 class UnsafePagePathError(ValueError):
-    """Raised when a page_path would resolve outside a patient's wiki dir."""
+    """Raised when a path component would resolve outside its containment directory."""
+
+
+def _validate_safe_id(root: Path, id_value: str, id_name: str) -> None:
+    """
+    Validate that an ID (patient_id, source_id) doesn't escape root when joined.
+    Raises UnsafePagePathError if the ID contains path traversal sequences.
+    """
+    resolved = (root / id_value).resolve()
+    if resolved.parent != root:
+        raise UnsafePagePathError(f"{id_name} {id_value!r} escapes the root directory")
 
 
 def patient_dir(patient_id: str, root: Path = PATIENTS_ROOT) -> Path:
+    _validate_safe_id(root, patient_id, "patient_id")
     return root / patient_id
 
 
@@ -43,6 +54,7 @@ def _resolve_safe_page_path(patient_id: str, page_path: str, root: Path = PATIEN
 
 def write_raw_source(patient_id: str, source_id: str, text: str, root: Path = PATIENTS_ROOT) -> Path:
     target_dir = raw_dir(patient_id, root)
+    _validate_safe_id(target_dir, source_id, "source_id")
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / f"{source_id}.txt"
     path.write_text(text, encoding="utf-8")

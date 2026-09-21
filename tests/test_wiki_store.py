@@ -59,3 +59,13 @@ def test_write_raw_source_creates_file(tmp_path):
 def test_patient_dirs_never_overlap_across_patients(tmp_path):
     assert wiki_store.patient_dir("patient-a", tmp_path) != wiki_store.patient_dir("patient-b", tmp_path)
     assert wiki_store.wiki_dir("patient-a", tmp_path) != wiki_store.wiki_dir("patient-b", tmp_path)
+
+
+def test_patient_id_traversal_is_rejected(tmp_path):
+    with pytest.raises(wiki_store.UnsafePagePathError):
+        wiki_store.write_wiki_page("../../etc", "passwd", "malicious", root=tmp_path)
+
+
+def test_source_id_traversal_is_rejected(tmp_path):
+    with pytest.raises(wiki_store.UnsafePagePathError):
+        wiki_store.write_raw_source("patient-a", "../../evil", "malicious", root=tmp_path)
