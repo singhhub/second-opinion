@@ -5,7 +5,10 @@ diff to an actual wiki/*.md file is wiki_review.py (Phase 3), not this
 module - nothing here ever writes under a patient's wiki/ directory.
 """
 
-from typing import List, Tuple
+import json
+from typing import Any, Dict, List, Optional, Tuple
+
+from pydantic import BaseModel, ValidationError
 
 import fitz  # PyMuPDF
 
@@ -99,3 +102,103 @@ async def extract_text(
         return await _extract_pdf(file_bytes, vision_model)
 
     raise ValueError(f"unsupported source_type {source_type!r}")
+
+
+DEFAULT_DIFF_MODEL = "claude/claude-sonnet-4-5-20250929"
+
+NEEDS_REVIEW_PAGE_PATH = "needs-review.md"
+
+DIFF_PROPOSAL_SYSTEM_PROMPT = """You maintain a per-patient medical wiki. \
+You will be shown the patient's CURRENT WIKI (every existing page, or \
+"(no pages yet)" if this is the first entry) and a NEW SOURCE (a medical \
+record, note, or transcription just added for this patient).
+
+Decide which single wiki page this source should update, or propose a \
+new page if no existing page fits. Produce the FULL new content of that \
+page after incorporating the source - not just the changed lines. \
+Preserve everything in the current page that the source doesn't affect; \
+merge new information in rather than replacing the whole page. Never \
+remove or soften an existing allergy or medication entry - if the source \
+seems to update one, note the change in the page but keep the prior \
+entry's history visible.
+
+Set "contradiction" to true if the source conflicts with something \
+already in the wiki (e.g. a medication list that omits a drug the wiki \
+says is current, or a fact that directly contradicts an existing page) \
+rather than simply adding new information. If true, contradiction_note \
+must explain the conflict in one sentence; if false, contradiction_note \
+must be null.
+
+Respond with ONLY a JSON object with exactly these keys: "page_path" \
+(e.g. "medications.md" or "by-system/cardiac.md"), "is_new_page" \
+(boolean), "new_page_content" (string, the full page), "contradiction" \
+(boolean), "contradiction_note" (string or null). No other text, no \
+markdown fences."""
+
+
+class ProposedDiff(BaseModel):
+    page_path: str
+    is_new_page: bool
+    new_page_content: str
+    contradiction: bool
+    contradiction_note: Optional[str] = None
+
+
+def _format_current_wiki(pages: Dict[str, str]) -> str:
+    if not pages:
+        return "(no pages yet)"
+    return "\n\n".join(
+        f"--- {path} ---\n{content}" for path, content in sorted(pages.items())
+    )
+
+
+def _parse_proposed_diff(raw: Optional[Dict[str, Any]]) -> Optional[ProposedDiff]:
+    if raw is None or not raw.get("content"):
+        return None
+    try:
+        data = json.loads(llm_client.strip_json_fence(raw["content"]))
+        return ProposedDiff(**data)
+    except (json.JSONDecodeError, ValidationError, TypeError):
+        return None
+
+
+async def propose_diff(
+    source_text: str,
+    existing_pages: Dict[str, str],
+    model: str = DEFAULT_DIFF_MODEL,
+) -> ProposedDiff:
+    """
+    Ask an LLM which wiki page a new source should update (or propose a
+    new page), producing that page's full new content plus a
+    contradiction flag. Retries once on malformed output, then falls
+    back to a needs-review placeholder a human must resolve manually - a
+    source is never silently dropped just because the LLM couldn't
+    propose a diff for it (design doc, Error handling).
+    """
+    prompt = (
+        f"CURRENT WIKI:\n{_format_current_wiki(existing_pages)}\n\n"
+        f"NEW SOURCE:\n{source_text}"
+    )
+
+    for _ in range(2):
+        raw = await llm_client.query_model(
+            model,
+            [
+                {"role": "system", "content": DIFF_PROPOSAL_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        proposed = _parse_proposed_diff(raw)
+        if proposed is not None:
+            return proposed
+
+    return ProposedDiff(
+        page_path=NEEDS_REVIEW_PAGE_PATH,
+        is_new_page=True,
+        new_page_content=(
+            "(automatic diff proposal failed after retries - needs manual "
+            "handling)\n\n--- raw source text follows ---\n\n" + source_text
+        ),
+        contradiction=False,
+        contradiction_note=None,
+    )
