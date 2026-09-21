@@ -182,3 +182,126 @@ async def test_ingest_source_missing_note_text_raises():
 async def test_ingest_source_missing_file_bytes_raises():
     with pytest.raises(ValueError):
         await wiki_ingest.ingest_source("patient-a", "pdf")
+
+
+@pytest.mark.parametrize("note_text", ["", "   ", "\n\t  \n"])
+async def test_ingest_source_empty_note_text_raises(note_text):
+    """An empty note would otherwise be written to raw/ and handed to the
+    diff-proposal LLM as "NEW SOURCE:\\n", whose invention becomes a
+    proposed medical-wiki diff."""
+    with pytest.raises(ValueError):
+        await wiki_ingest.ingest_source("patient-a", "note", note_text=note_text)
+
+
+# --- Tiering rule (_requires_approval) ------------------------------------
+#
+# page_path arrives verbatim from LLM-generated JSON, so the fixed tiering
+# rule must survive every plausible formatting variant of the same page -
+# a miss here silently produces requires_approval=0 for an allergy or
+# medication edit.
+
+@pytest.mark.parametrize(
+    "page_path, contradiction, expected",
+    [
+        ("medications.md", False, True),
+        ("allergies.md", False, True),
+        ("Medications.md", False, True),
+        ("ALLERGIES.MD", False, True),
+        ("wiki/medications.md", False, True),
+        ("./medications.md", False, True),
+        ("  medications.md  ", False, True),
+        ("medications.md ", False, True),
+        ("by-system/medications.md", False, True),
+        ("wiki\\allergies.md", False, True),
+        (wiki_ingest.NEEDS_REVIEW_PAGE_PATH, False, True),
+        ("wiki/" + wiki_ingest.NEEDS_REVIEW_PAGE_PATH, False, True),
+        ("overview.md", True, True),
+        ("by-system/cardiac.md", True, True),
+        ("overview.md", False, False),
+        ("by-system/cardiac.md", False, False),
+        ("conditions.md", False, False),
+    ],
+)
+def test_requires_approval_page_path_variants(page_path, contradiction, expected):
+    assert wiki_ingest._requires_approval(page_path, contradiction) is expected
+
+
+async def test_ingest_source_tiered_page_with_prefix_still_requires_approval(tmp_path):
+    """End-to-end proof of the tiering fix: the design spec's own schema
+    comment writes this page as "wiki/medications.md"."""
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": "wiki/Medications.md", "is_new_page": True,
+        "new_page_content": "# Medications\n- Warfarin 5mg",
+        "contradiction": False, "contradiction_note": None,
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ):
+        await wiki_ingest.ingest_source(
+            patient_id, "note", note_text="Started Warfarin 5mg.",
+            db_path=db_path, patients_root=patients_root,
+        )
+
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["requires_approval"] == 1
+
+
+# --- Failure paths --------------------------------------------------------
+
+async def test_ingest_source_extraction_failure_records_failed_raw_source(tmp_path):
+    """A failed extraction must leave a status='failed' row so the review
+    page can surface it - the upload must never just vanish."""
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    with patch.object(
+        wiki_ingest.llm_client, "query_vision", new=AsyncMock(return_value=None)
+    ), patch.object(wiki_ingest.llm_client, "query_model", new=AsyncMock()) as mock_model:
+        with pytest.raises(wiki_ingest.ExtractionError):
+            await wiki_ingest.ingest_source(
+                patient_id, "jpg", file_bytes=b"fake-jpg-bytes", filename="scan.jpg",
+                db_path=db_path, patients_root=patients_root,
+            )
+
+    with wiki_db.get_connection(db_path) as conn:
+        rows = [
+            dict(row) for row in conn.execute(
+                "SELECT * FROM raw_sources WHERE patient_id = ?", (patient_id,)
+            ).fetchall()
+        ]
+
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["filename"] == "scan.jpg"
+    assert rows[0]["source_type"] == "jpg"
+    # No text exists, so nothing was written and no diff was proposed.
+    assert not (wiki_store.raw_dir(patient_id, patients_root) / f"{rows[0]['id']}.txt").exists()
+    assert wiki_db.list_pending_diffs(patient_id, db_path=db_path) == []
+    assert mock_model.await_count == 0
+
+
+async def test_ingest_source_unknown_patient_raises_before_writing_phi(tmp_path):
+    """PHI must not hit disk under data/patients/<bogus-id>/ before the
+    foreign key on raw_sources gets a chance to complain."""
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    bogus_patient_id = "0" * 32
+
+    with patch.object(wiki_ingest.llm_client, "query_model", new=AsyncMock()) as mock_model:
+        with pytest.raises(ValueError):
+            await wiki_ingest.ingest_source(
+                bogus_patient_id, "note",
+                note_text="Patient reports chest pain radiating to left arm.",
+                db_path=db_path, patients_root=patients_root,
+            )
+
+    assert not (patients_root / bogus_patient_id).exists()
+    assert mock_model.await_count == 0

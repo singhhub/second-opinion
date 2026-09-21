@@ -29,6 +29,22 @@ def _pdf_blank_page() -> bytes:
     return data
 
 
+# PyMuPDF refuses to *save* a zero-page document ("cannot save with zero
+# pages"), so a hand-built one is the only way to exercise the real
+# degenerate case: a PDF that opens fine and yields no text at all.
+_PDF_NO_PAGES = b"""%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [] /Count 0 >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+"""
+
+
 async def test_extract_text_txt_decodes_directly():
     text, method = await wiki_ingest.extract_text(b"Patient reports mild headache.", "txt")
 
@@ -107,3 +123,23 @@ async def test_extract_text_malformed_pdf_raises_extraction_error():
 async def test_extract_text_txt_invalid_utf8_raises_extraction_error():
     with pytest.raises(wiki_ingest.ExtractionError):
         await wiki_ingest.extract_text(b"\xff\xfe not valid utf-8", "txt")
+
+
+async def test_extract_text_pdf_with_no_pages_raises_extraction_error():
+    """A zero-page PDF used to return ("", "local") - empty text silently
+    became a proposed medical-wiki diff built from nothing."""
+    with patch.object(wiki_ingest.llm_client, "query_vision", new=AsyncMock()) as mock_vision:
+        with pytest.raises(wiki_ingest.ExtractionError):
+            await wiki_ingest.extract_text(_PDF_NO_PAGES, "pdf")
+
+    assert mock_vision.await_count == 0
+
+
+async def test_extract_text_empty_txt_raises_extraction_error():
+    with pytest.raises(wiki_ingest.ExtractionError):
+        await wiki_ingest.extract_text(b"", "txt")
+
+
+async def test_extract_text_whitespace_only_txt_raises_extraction_error():
+    with pytest.raises(wiki_ingest.ExtractionError):
+        await wiki_ingest.extract_text(b"   \n\t  \n", "txt")

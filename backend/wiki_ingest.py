@@ -7,7 +7,7 @@ module - nothing here ever writes under a patient's wiki/ directory.
 
 import json
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ValidationError
@@ -62,7 +62,15 @@ async def _extract_pdf(file_bytes: bytes, vision_model: str) -> Tuple[str, str]:
             image_bytes = pixmap.tobytes("png")
             page_texts.append(await _extract_image_bytes(image_bytes, "image/png", vision_model))
             used_vision = True
-        return "\n\n".join(page_texts), ("vision_llm" if used_vision else "local")
+        text = "\n\n".join(page_texts)
+        # A PDF with no pages at all (or whose only text is whitespace)
+        # yields "" here. Returning that would hand an empty source to the
+        # diff-proposal LLM, whose invention from nothing then becomes a
+        # proposed medical-wiki diff - so refuse it instead. The vision
+        # path already guards this in _extract_image_bytes.
+        if not used_vision and not text.strip():
+            raise ExtractionError("PDF contained no extractable text (no pages or empty text layer)")
+        return text, ("vision_llm" if used_vision else "local")
     finally:
         doc.close()
 
@@ -86,14 +94,21 @@ async def extract_text(
     source_type "jpg"/"png": vision LLM directly on the raw image bytes,
         extraction_method "vision_llm".
 
+    Raises ExtractionError if a source yields no text at all - an empty
+    extraction is a failure to be surfaced, never an empty source to feed
+    downstream.
+
     Typed notes never reach this function - they have no file at all
     (see wiki_ingest.ingest_source).
     """
     if source_type == "txt":
         try:
-            return file_bytes.decode("utf-8"), "local"
+            text = file_bytes.decode("utf-8")
         except UnicodeDecodeError as e:
             raise ExtractionError(f"txt source is not valid UTF-8: {e}")
+        if not text.strip():
+            raise ExtractionError("txt source is empty")
+        return text, "local"
 
     if source_type in ("jpg", "png"):
         media_type = "image/jpeg" if source_type == "jpg" else "image/png"
@@ -209,6 +224,23 @@ async def propose_diff(
 TIERED_APPROVAL_PAGES = {"allergies.md", "medications.md"}
 
 
+def _normalize_page_path(page_path: str) -> str:
+    """
+    Reduce an LLM-proposed page_path to a canonical form for tiering
+    comparisons. page_path is free text the model wrote, so the same page
+    arrives spelled many ways - "wiki/medications.md" (the form the design
+    doc's own schema comment uses), "Medications.md", "./medications.md",
+    a trailing space, a backslash separator. Comparing the raw string
+    would let any of those slip past the tiering rule.
+    """
+    normalized = page_path.strip().replace("\\", "/").lower()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    if normalized.startswith("wiki/"):
+        normalized = normalized[len("wiki/"):]
+    return normalized
+
+
 def _requires_approval(page_path: str, contradiction: bool) -> bool:
     """
     Tiered approval (design doc, amended 2026-09-20): allergies,
@@ -216,11 +248,19 @@ def _requires_approval(page_path: str, contradiction: bool) -> bool:
     always require a human to confirm the diff against its source before
     it can be applied. This is a fixed rule in code - safety-critical
     tiering must never be the model's own judgment call.
+
+    Because page_path is LLM-generated free text, matching is done on the
+    normalized *basename*, so a nested proposal like
+    "by-system/medications.md" is tiered too. Erring toward requiring
+    approval is the safe direction: a later phase auto-applies
+    requires_approval=0 diffs with no human in the loop.
     """
+    normalized = _normalize_page_path(page_path)
+    basename = PurePosixPath(normalized).name
     return (
-        page_path in TIERED_APPROVAL_PAGES
-        or page_path == NEEDS_REVIEW_PAGE_PATH
-        or contradiction
+        contradiction
+        or normalized == _normalize_page_path(NEEDS_REVIEW_PAGE_PATH)
+        or basename in TIERED_APPROVAL_PAGES
     )
 
 
@@ -242,22 +282,57 @@ async def ingest_source(
     diff, and write the pending_diffs row. Never writes to wiki/ - that
     only happens once a human approves the diff (wiki_review.py, Phase 3).
 
+    Raises ValueError for an unusable request (unknown patient, missing or
+    empty note text, missing file bytes) and ExtractionError if the source
+    yields no text - but an extraction failure still leaves a
+    status='failed' raw_sources row behind, so a caregiver's upload is
+    never lost without a trace (design doc, Error handling).
+
     Returns the new pending_diffs row's id.
     """
+    # Argument validation first: it needs no I/O and touches nothing.
     if source_type == "note":
-        if note_text is None:
-            raise ValueError("note_text is required when source_type is 'note'")
-        text, extraction_method = note_text, "manual"
-    else:
-        if file_bytes is None:
-            raise ValueError(f"file_bytes is required when source_type is {source_type!r}")
-        text, extraction_method = await extract_text(file_bytes, source_type, vision_model)
+        if note_text is None or not note_text.strip():
+            raise ValueError("note_text is required and must be non-empty when source_type is 'note'")
+    elif file_bytes is None:
+        raise ValueError(f"file_bytes is required when source_type is {source_type!r}")
+
+    # Then the patient, BEFORE any extraction or disk write. create_raw_source's
+    # foreign key would catch an unknown patient_id eventually, but only after
+    # the extracted medical text had already been written to
+    # <patients_root>/<bogus-id>/raw/, with nothing to clean it up.
+    if wiki_db.get_patient(patient_id, db_path) is None:
+        raise ValueError(f"no such patient: {patient_id!r}")
 
     source_id = uuid.uuid4().hex
-    extracted_path = wiki_store.write_raw_source(patient_id, source_id, text, root=patients_root)
+    # Computed up front (not inside the except below) so a path-unsafe id
+    # surfaces as UnsafePagePathError before extraction, rather than while
+    # handling an extraction failure.
+    extracted_path = wiki_store.raw_dir(patient_id, patients_root) / f"{source_id}.txt"
+
+    if source_type == "note":
+        text, extraction_method = note_text, "manual"
+    else:
+        try:
+            text, extraction_method = await extract_text(file_bytes, source_type, vision_model)
+        except ExtractionError:
+            # Record the upload as failed before re-raising. Without a row
+            # there is no database record the upload ever happened, nothing
+            # for the review page to surface, and no way for the caregiver
+            # to learn their document vanished. extracted_path records where
+            # the text would have gone; no file is written, since there is
+            # no text to write.
+            wiki_db.create_raw_source(
+                source_id, patient_id, filename, source_type, "failed",
+                str(extracted_path), document_date, db_path=db_path,
+            )
+            wiki_db.update_raw_source_status(source_id, "failed", db_path=db_path)
+            raise
+
+    written_path = wiki_store.write_raw_source(patient_id, source_id, text, root=patients_root)
     wiki_db.create_raw_source(
         source_id, patient_id, filename, source_type, extraction_method,
-        str(extracted_path), document_date, db_path=db_path,
+        str(written_path), document_date, db_path=db_path,
     )
 
     existing_pages = {
