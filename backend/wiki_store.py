@@ -21,8 +21,9 @@ def _validate_safe_id(root: Path, id_value: str, id_name: str) -> None:
     Validate that an ID (patient_id, source_id) doesn't escape root when joined.
     Raises UnsafePagePathError if the ID contains path traversal sequences.
     """
+    root_resolved = root.resolve()
     resolved = (root / id_value).resolve()
-    if resolved.parent != root:
+    if resolved.parent != root_resolved:
         raise UnsafePagePathError(f"{id_name} {id_value!r} escapes the root directory")
 
 

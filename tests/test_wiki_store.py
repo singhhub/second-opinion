@@ -1,5 +1,7 @@
 """Tests for patient wiki file storage helpers (backend/wiki_store.py)."""
 
+from pathlib import Path
+
 import pytest
 
 from backend import wiki_store
@@ -69,3 +71,20 @@ def test_patient_id_traversal_is_rejected(tmp_path):
 def test_source_id_traversal_is_rejected(tmp_path):
     with pytest.raises(wiki_store.UnsafePagePathError):
         wiki_store.write_raw_source("patient-a", "../../evil", "malicious", root=tmp_path)
+
+
+def test_safe_ids_work_with_relative_root(tmp_path, monkeypatch):
+    # Regression test: ensure safe patient_id/source_id work with relative roots
+    # (not just absolute tmp_path used in other tests)
+    monkeypatch.chdir(tmp_path)
+    relative_root = Path("data")
+
+    # Should not raise for safe patient_id with relative root
+    path = wiki_store.write_wiki_page("patient-a", "test.md", "content", root=relative_root)
+    assert path.exists()
+    assert path.read_text() == "content"
+
+    # Should not raise for safe source_id with relative root
+    path = wiki_store.write_raw_source("patient-a", "source-1", "text", root=relative_root)
+    assert path.exists()
+    assert path.read_text() == "text"
