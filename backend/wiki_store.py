@@ -102,6 +102,8 @@ def ensure_repo(root: Path = PATIENTS_ROOT) -> None:
 
 
 def commit_wiki_change(patient_id: str, message: str, root: Path = PATIENTS_ROOT) -> None:
+    # Validate patient_id before using it in subprocess - prevents git-flag injection
+    patient_dir(patient_id, root)
     ensure_repo(root)
     subprocess.run(["git", "add", patient_id], cwd=root, check=True)
     subprocess.run(["git", "commit", "-q", "-m", message], cwd=root, check=True)
