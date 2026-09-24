@@ -202,3 +202,49 @@ def list_pending_diffs(
     with get_connection(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
     return [dict(row) for row in rows]
+
+
+def create_approval(
+    diff_id: str,
+    actor_id: str,
+    decision: str,
+    note: Optional[str] = None,
+    db_path: Path = DB_PATH,
+) -> str:
+    approval_id = uuid.uuid4().hex
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO approvals (id, diff_id, actor_id, decision, decided_at, note)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (approval_id, diff_id, actor_id, decision, _now(), note),
+        )
+    return approval_id
+
+
+def create_audit_log(
+    patient_id: str,
+    actor_id: str,
+    action: str,
+    target: Optional[str] = None,
+    detail: Optional[str] = None,
+    db_path: Path = DB_PATH,
+) -> str:
+    entry_id = uuid.uuid4().hex
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO audit_log (id, patient_id, actor_id, action, target, at, detail)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry_id, patient_id, actor_id, action, target, _now(), detail),
+        )
+    return entry_id
+
+
+def update_pending_diff_status(diff_id: str, status: str, db_path: Path = DB_PATH) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE pending_diffs SET status = ? WHERE id = ?", (status, diff_id)
+        )
