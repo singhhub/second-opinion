@@ -1,8 +1,14 @@
 """Ingest pipeline for the patient wiki: extract text from an uploaded
-source, propose a wiki diff via LLM, and write a pending_diffs row for
-human review. See the design doc's INGEST flow. Applying an approved
-diff to an actual wiki/*.md file is wiki_review.py (Phase 3), not this
-module - nothing here ever writes under a patient's wiki/ directory.
+source, propose a wiki diff via LLM, and write a pending_diffs row. See
+the design doc's INGEST flow.
+
+Turning a decided diff into an actual wiki/*.md file change is
+wiki_review.apply_diff()'s job, not this module's. ingest_source() does
+call it, on one branch only: a diff whose requires_approval is False
+(no tiered page, no contradiction) is auto-applied here immediately, so
+that branch does write under the patient's wiki/. A diff that requires
+approval is left untouched at status='pending' - nothing is written for
+it until a human confirms it in a later phase.
 """
 
 import json
@@ -232,13 +238,25 @@ def _normalize_page_path(page_path: str) -> str:
     doc's own schema comment uses), "Medications.md", "./medications.md",
     a trailing space, a backslash separator. Comparing the raw string
     would let any of those slip past the tiering rule.
+
+    Trailing dots and whitespace are stripped per path segment, not just
+    off the whole string: "medications.md." is the same page as
+    "medications.md" to Windows, which silently drops the trailing dot at
+    write time - so the tiering rule must see them as the same page too.
+
+    The result is also what gets recorded in pending_diffs and written to
+    disk (see ingest_source): the string that is tiered must be exactly
+    the string that is applied.
     """
     normalized = page_path.strip().replace("\\", "/").lower()
     if normalized.startswith("./"):
         normalized = normalized[2:]
     if normalized.startswith("wiki/"):
         normalized = normalized[len("wiki/"):]
-    return normalized
+    # An all-dots segment ("." or "..") is left alone: that's a traversal
+    # attempt for wiki_store to reject, not a page name to tidy up.
+    segments = [seg.lstrip(" \t").rstrip(" \t.") or seg for seg in normalized.split("/")]
+    return "/".join(segments)
 
 
 def _requires_approval(page_path: str, contradiction: bool) -> bool:
@@ -252,7 +270,7 @@ def _requires_approval(page_path: str, contradiction: bool) -> bool:
     Because page_path is LLM-generated free text, matching is done on the
     normalized *basename*, so a nested proposal like
     "by-system/medications.md" is tiered too. Erring toward requiring
-    approval is the safe direction: a later phase auto-applies
+    approval is the safe direction: ingest_source auto-applies
     requires_approval=0 diffs with no human in the loop.
     """
     normalized = _normalize_page_path(page_path)
@@ -279,8 +297,20 @@ async def ingest_source(
     """
     Full ingest pipeline for one source: extract text, write the
     raw_sources row + extracted text file, ask an LLM to propose a wiki
-    diff, and write the pending_diffs row. Never writes to wiki/ - that
-    only happens once a human approves the diff (wiki_review.py, Phase 3).
+    diff, and write the pending_diffs row.
+
+    If the proposed diff doesn't require approval (not a tiered page, no
+    contradiction), it is then auto-applied immediately via
+    wiki_review.apply_diff() - so this function does write under the
+    patient's wiki/ on that branch. A diff that requires approval is left
+    at status='pending' and nothing is written for it; applying that one
+    waits on a human confirming it in a later phase.
+
+    An auto-apply failure is degraded-but-recorded, not fatal: the
+    raw_sources/pending_diffs rows already written are kept, the diff stays
+    'pending', and an audit_log row (action 'auto_apply_failed') records
+    the attempt. The two exceptions are wiki_store.WikiRemoteConfiguredError
+    and wiki_store.UnsafePagePathError, which propagate - see below.
 
     Raises ValueError for an unusable request (unknown patient, missing or
     empty note text, missing file bytes) and ExtractionError if the source
@@ -340,10 +370,20 @@ async def ingest_source(
         for page_path in wiki_store.list_wiki_pages(patient_id, root=patients_root)
     }
     proposed = await propose_diff(text, existing_pages, model=diff_model)
-    requires_approval = _requires_approval(proposed.page_path, proposed.contradiction)
+    # Normalize ONCE, here, and use that single value for the tiering
+    # decision, the pending_diffs row, and the auto-apply write below. The
+    # tiering gate used to normalize privately and throw the result away,
+    # which left three different strings in play for one diff: a critical
+    # page spelled "allergies.md." tiered as non-critical and was then
+    # auto-applied (Windows drops the trailing dot on write), and the
+    # spec's own "wiki/overview.md" spelling tiered correctly but landed
+    # at wiki/wiki/overview.md. What is tiered must be what is recorded
+    # and what is written.
+    page_path = _normalize_page_path(proposed.page_path)
+    requires_approval = _requires_approval(page_path, proposed.contradiction)
 
     diff_id = wiki_db.create_pending_diff(
-        patient_id, source_id, proposed.page_path, proposed.is_new_page,
+        patient_id, source_id, page_path, proposed.is_new_page,
         proposed.new_page_content, proposed.contradiction,
         proposed.contradiction_note, requires_approval, db_path=db_path,
     )
@@ -353,15 +393,54 @@ async def ingest_source(
     if not requires_approval:
         try:
             wiki_review.apply_diff(
-                patient_id, diff_id, proposed.page_path, proposed.new_page_content,
-                actor_id=config.AUTO_APPLY_ACTOR_ID, decision="auto_applied",
+                patient_id, diff_id, page_path, proposed.new_page_content,
+                # wiki_review's own constant, not a literal: its
+                # defense-in-depth tiering check keys off this exact value,
+                # so the two must never drift apart.
+                actor_id=config.AUTO_APPLY_ACTOR_ID,
+                decision=wiki_review.AUTO_APPLY_DECISION,
                 source_id=source_id, db_path=db_path, root=patients_root,
             )
+        except (wiki_store.WikiRemoteConfiguredError, wiki_store.UnsafePagePathError):
+            # Not routine auto-apply hiccups to absorb into the degraded
+            # path below. A configured git remote means PHI could leave
+            # this machine, and an unsafe page path means a write could
+            # land outside the patient's wiki - both are alarms the caller
+            # has to see, not stdout noise behind a normal-looking return.
+            raise
         except Exception as e:
             # Partial-apply failure: pending_diffs stays at its pre-apply
             # 'pending' status (apply_diff never reached the status update),
             # surfaced later by a lint routine rather than losing this
             # ingest's already-written raw_sources/pending_diffs rows.
             print(f"[wiki_ingest] auto-apply failed for diff {diff_id}: {e}")
+            # ...and a durable record of it, because the design doc's
+            # orphaned-source lint cannot see this case: by now BOTH the
+            # raw_sources row ('ingested') and the pending_diffs row exist,
+            # so nothing is orphaned by that check's definition. Without
+            # this row the only trace of a failed auto-apply is the print
+            # above.
+            try:
+                wiki_db.create_audit_log(
+                    patient_id,
+                    config.AUTO_APPLY_ACTOR_ID,
+                    "auto_apply_failed",
+                    target=diff_id,
+                    detail=json.dumps({
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "page_path": page_path,
+                    }),
+                    db_path=db_path,
+                )
+            except Exception as audit_error:
+                # The audit write is best-effort: if the failure that got
+                # us here was the database itself, this one fails too, and
+                # turning that into a raised exception would undo the
+                # graceful degradation this whole branch exists for.
+                print(
+                    f"[wiki_ingest] failed to record auto_apply_failed audit row "
+                    f"for diff {diff_id}: {audit_error}"
+                )
 
     return diff_id

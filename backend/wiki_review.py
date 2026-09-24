@@ -6,14 +6,52 @@ future human-confirm path (Phase 4) - only the caller and actor_id
 differ, per the design doc's Components table. This module never decides
 WHETHER to apply a diff (that's wiki_ingest.py's _requires_approval gate,
 or Phase 4's human confirmation) - it only turns an already-decided diff
-into an actual file change, git commit, and audit trail.
+into an actual file change, git commit, and audit trail. Its one veto is
+a defense-in-depth refusal to auto-apply a tiered page (see
+TieringViolationError below); it can say no to that, never yes to
+anything its caller didn't already decide.
 """
 
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from . import wiki_db, wiki_store
+
+# Deliberately duplicated from wiki_ingest.TIERED_APPROVAL_PAGES rather
+# than imported: wiki_ingest imports THIS module (it's the auto-apply
+# caller), so importing it back would be a circular import. The two must
+# stay in sync - this copy exists only as the second, independent safety
+# net below, and a drift between them can only ever make this net looser,
+# never the tiering gate itself.
+TIERED_APPROVAL_PAGES = frozenset({"allergies.md", "medications.md"})
+
+# The decision value the system uses when it applies a diff with no human
+# in the loop (wiki_ingest's auto-apply path). A human confirmation uses a
+# different decision, and is allowed to apply a tiered page.
+AUTO_APPLY_DECISION = "auto_applied"
+
+
+class TieringViolationError(RuntimeError):
+    """Raised when the auto-apply path tries to write a tiered page
+    (allergies.md/medications.md). Those always require a human to confirm
+    the diff against its source - "no exceptions, not a configurable
+    setting", per the design doc."""
+
+
+def _tiered_basename(page_path: str) -> str:
+    """
+    Reduce page_path to the basename the tiering rule compares against,
+    normalized the same way wiki_ingest._normalize_page_path does it
+    (separator, case, and per-segment trailing dots/whitespace - a trailing
+    dot matters because Windows silently drops it, so "allergies.md."
+    lands on disk as allergies.md).
+    """
+    basename = PurePosixPath(page_path.strip().replace("\\", "/").lower()).name
+    stripped = basename.lstrip(" \t").rstrip(" \t.")
+    # An all-dots segment (".", "..") is left alone: it is a path-traversal
+    # attempt for wiki_store to reject, not a page name to tidy up.
+    return stripped or basename
 
 
 def _rebuild_index(patient_id: str, root: Path = wiki_store.PATIENTS_ROOT) -> str:
@@ -58,7 +96,19 @@ def apply_diff(
     on a later lint routine (not built in this phase) to surface that
     case; this function's job is only to not paper over it by recording
     success prematurely. The exception propagates to the caller.
+
+    Raises TieringViolationError, before writing anything, if the system
+    itself (decision == "auto_applied") tries to apply a tiered page. That
+    is defense in depth behind wiki_ingest's _requires_approval gate, not a
+    replacement for it: if that gate ever regresses, a critical page still
+    cannot be written with no human in the loop.
     """
+    if decision == AUTO_APPLY_DECISION and _tiered_basename(page_path) in TIERED_APPROVAL_PAGES:
+        raise TieringViolationError(
+            f"refusing to auto-apply {page_path!r}: {_tiered_basename(page_path)} is a "
+            "tiered page and always requires human approval"
+        )
+
     wiki_store.write_wiki_page(patient_id, page_path, new_content, root=root)
 
     index_content = _rebuild_index(patient_id, root)

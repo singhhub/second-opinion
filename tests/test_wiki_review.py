@@ -56,9 +56,12 @@ async def test_apply_diff_rebuilds_index_md_with_new_page(tmp_path):
     patient_id = _setup_patient(db_path)
     diff_id = _create_diff(patient_id, db_path, page_path="medications.md")
 
+    # decision="approved" (a human), not "auto_applied": medications.md is a
+    # tiered page, which only ever reaches apply_diff() through the
+    # human-confirm path - the auto-apply path is blocked from it.
     wiki_review.apply_diff(
         patient_id, diff_id, "medications.md", "# Medications\n- Lisinopril",
-        actor_id="system-auto", decision="auto_applied", source_id="source-1",
+        actor_id="local-operator", decision="approved", source_id="source-1",
         db_path=db_path, root=patients_root,
     )
 
@@ -226,3 +229,67 @@ async def test_apply_diff_partial_failure_leaves_status_untouched(tmp_path):
     # handling section (surfaced later by lint, not rolled back here).
     content = wiki_store.read_wiki_page(patient_id, "overview.md", root=patients_root)
     assert content == "# Overview"
+
+
+# --- Defense in depth: a tiered page can never be auto-applied -------------
+#
+# wiki_ingest's _requires_approval gate is the first line of defense. This
+# is the second, independent one: even if a caller hands apply_diff() a
+# critical page with decision="auto_applied" (a regression in that gate, or
+# a future caller with different assumptions), nothing is written.
+
+@pytest.mark.parametrize(
+    "page_path",
+    [
+        "allergies.md",
+        "medications.md",
+        "wiki/medications.md",
+        "medications.md.",
+        "Medications.MD",
+        "by-system/allergies.md",
+        "wiki\\allergies.md",
+    ],
+)
+async def test_apply_diff_refuses_to_auto_apply_a_tiered_page(tmp_path, page_path):
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    patient_id = _setup_patient(db_path)
+    diff_id = _create_diff(patient_id, db_path, page_path=page_path)
+
+    with pytest.raises(wiki_review.TieringViolationError):
+        wiki_review.apply_diff(
+            patient_id, diff_id, page_path, "# Medications\n- Warfarin 5mg",
+            actor_id="system-auto", decision="auto_applied", source_id="source-1",
+            db_path=db_path, root=patients_root,
+        )
+
+    # Nothing at all happened: no file, no approval row, no status change.
+    assert wiki_store.list_wiki_pages(patient_id, root=patients_root) == []
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["status"] == "pending"
+    with wiki_db.get_connection(db_path) as conn:
+        approval_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM approvals WHERE diff_id = ?", (diff_id,)
+        ).fetchone()["n"]
+    assert approval_count == 0
+
+
+async def test_apply_diff_allows_a_human_to_apply_a_tiered_page(tmp_path):
+    """The guard is scoped to the system applying a diff by itself - a
+    human confirmation (decision="approved") is exactly how a tiered page
+    is meant to be applied, and must still work."""
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    patient_id = _setup_patient(db_path)
+    diff_id = _create_diff(patient_id, db_path, page_path="allergies.md")
+
+    wiki_review.apply_diff(
+        patient_id, diff_id, "allergies.md", "# Allergies\n- Penicillin",
+        actor_id="local-operator", decision="approved", source_id="source-1",
+        db_path=db_path, root=patients_root,
+    )
+
+    content = wiki_store.read_wiki_page(patient_id, "allergies.md", root=patients_root)
+    assert content == "# Allergies\n- Penicillin"
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["status"] == "approved"

@@ -388,6 +388,89 @@ async def test_ingest_source_does_not_auto_apply_contradiction_diff(tmp_path):
     assert wiki_store.list_wiki_pages(patient_id, root=patients_root) == []
 
 
+# --- Normalize-once: what is tiered is what is recorded and written -------
+#
+# The tiering gate normalizes page_path before comparing it against the
+# critical-page set, but the recorded pending_diffs row and the auto-apply
+# file write used to see the RAW LLM string instead. Two different strings
+# for one diff is how a critical page slips past the gate and still lands
+# on disk, so these tests pin the normalized value all the way through.
+
+CRITICAL_PAGE_SPELLINGS = [
+    "medications.md",       # exact - baseline, always tiered
+    "wiki/medications.md",  # the design spec's own schema-comment spelling
+    "medications.md.",      # trailing dot (Windows drops it at write time)
+    "Medications.MD",       # case
+]
+
+
+@pytest.mark.parametrize("page_path", CRITICAL_PAGE_SPELLINGS)
+def test_requires_approval_critical_page_spellings(page_path):
+    assert wiki_ingest._requires_approval(page_path, False) is True
+
+
+@pytest.mark.parametrize("page_path", CRITICAL_PAGE_SPELLINGS)
+async def test_ingest_source_never_auto_applies_critical_page_spelling(tmp_path, page_path):
+    """No spelling of a critical page may ever be auto-applied: the row
+    stays 'pending' and nothing appears under the patient's wiki/."""
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": page_path, "is_new_page": True,
+        "new_page_content": "# Medications\n- Warfarin 5mg",
+        "contradiction": False, "contradiction_note": None,
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ):
+        await wiki_ingest.ingest_source(
+            patient_id, "note", note_text="Started Warfarin 5mg.",
+            db_path=db_path, patients_root=patients_root,
+        )
+
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["requires_approval"] == 1
+    assert diffs[0]["status"] == "pending"
+    assert wiki_store.list_wiki_pages(patient_id, root=patients_root) == []
+    assert not wiki_store.wiki_dir(patient_id, patients_root).exists()
+
+
+async def test_ingest_source_writes_normalized_page_path(tmp_path):
+    """"wiki/overview.md" is the spelling the design spec's own schema
+    comment shows. The wiki/ prefix must be stripped once and that single
+    normalized value used for the DB row AND the file write - writing the
+    raw string would fork the layout into wiki/wiki/overview.md."""
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": "wiki/overview.md", "is_new_page": True,
+        "new_page_content": "# Overview\nGeneral clinical picture.",
+        "contradiction": False, "contradiction_note": None,
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ):
+        await wiki_ingest.ingest_source(
+            patient_id, "note", note_text="General checkup notes.",
+            db_path=db_path, patients_root=patients_root,
+        )
+
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["page_path"] == "overview.md"
+    assert diffs[0]["status"] == "auto_applied"
+    assert sorted(wiki_store.list_wiki_pages(patient_id, root=patients_root)) == [
+        "index.md", "log.md", "overview.md",
+    ]
+    content = wiki_store.read_wiki_page(patient_id, "overview.md", root=patients_root)
+    assert content == "# Overview\nGeneral clinical picture."
+
+
 async def test_ingest_source_auto_apply_failure_does_not_crash_ingest(tmp_path):
     db_path = tmp_path / "patients.db"
     patients_root = tmp_path / "patients"
@@ -412,3 +495,73 @@ async def test_ingest_source_auto_apply_failure_does_not_crash_ingest(tmp_path):
     assert diff_id is not None
     diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
     assert diffs[0]["status"] == "pending"
+
+
+async def test_ingest_source_auto_apply_failure_writes_audit_log_row(tmp_path):
+    """A failed auto-apply must leave a durable trace. Neither the
+    raw_sources row nor the pending_diffs row is 'orphaned' by then, so
+    the design doc's orphaned-source lint can't see this case - without
+    an audit_log row the failure is only ever a print() to stdout."""
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": "overview.md", "is_new_page": True,
+        "new_page_content": "# Overview", "contradiction": False,
+        "contradiction_note": None,
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ), patch.object(
+        wiki_ingest.wiki_review, "apply_diff", side_effect=RuntimeError("git commit failed")
+    ):
+        diff_id = await wiki_ingest.ingest_source(
+            patient_id, "note", note_text="General checkup notes.",
+            db_path=db_path, patients_root=patients_root,
+        )
+
+    with wiki_db.get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM audit_log WHERE action = ? AND target = ?",
+            ("auto_apply_failed", diff_id),
+        ).fetchone()
+    assert row is not None
+    assert row["patient_id"] == patient_id
+    assert row["actor_id"] == config.AUTO_APPLY_ACTOR_ID
+    detail = json.loads(row["detail"])
+    assert "git commit failed" in detail["error"]
+    assert detail["page_path"] == "overview.md"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        wiki_store.WikiRemoteConfiguredError("remote 'origin' is configured"),
+        wiki_store.UnsafePagePathError("page_path escapes the wiki directory"),
+    ],
+)
+async def test_ingest_source_auto_apply_reraises_safety_errors(tmp_path, error):
+    """A configured git remote means PHI could leave this machine, and an
+    unsafe page path means a write could land outside the wiki. Neither is
+    a routine auto-apply hiccup to absorb into graceful degradation - both
+    must propagate out of ingest_source()."""
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": "overview.md", "is_new_page": True,
+        "new_page_content": "# Overview", "contradiction": False,
+        "contradiction_note": None,
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ), patch.object(wiki_ingest.wiki_review, "apply_diff", side_effect=error):
+        with pytest.raises(type(error)):
+            await wiki_ingest.ingest_source(
+                patient_id, "note", note_text="General checkup notes.",
+                db_path=db_path, patients_root=patients_root,
+            )
