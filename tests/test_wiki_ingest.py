@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import fitz
 import pytest
 
-from backend import wiki_db, wiki_ingest, wiki_store
+from backend import config, wiki_db, wiki_ingest, wiki_review, wiki_store
 
 
 def _pdf_with_text(text: str) -> bytes:
@@ -305,3 +305,110 @@ async def test_ingest_source_unknown_patient_raises_before_writing_phi(tmp_path)
 
     assert not (patients_root / bogus_patient_id).exists()
     assert mock_model.await_count == 0
+
+
+# --- Auto-apply wiring -----------------------------------------------------
+
+async def test_ingest_source_auto_applies_non_tiered_diff(tmp_path):
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": "overview.md", "is_new_page": True,
+        "new_page_content": "# Overview\nGeneral clinical picture.",
+        "contradiction": False, "contradiction_note": None,
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ):
+        diff_id = await wiki_ingest.ingest_source(
+            patient_id, "note", note_text="General checkup notes.",
+            db_path=db_path, patients_root=patients_root,
+        )
+
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["status"] == "auto_applied"
+    content = wiki_store.read_wiki_page(patient_id, "overview.md", root=patients_root)
+    assert content == "# Overview\nGeneral clinical picture."
+    with wiki_db.get_connection(db_path) as conn:
+        approval = conn.execute(
+            "SELECT * FROM approvals WHERE diff_id = ?", (diff_id,)
+        ).fetchone()
+    assert approval["actor_id"] == config.AUTO_APPLY_ACTOR_ID
+    assert approval["decision"] == "auto_applied"
+
+
+async def test_ingest_source_does_not_auto_apply_tiered_diff(tmp_path):
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": "allergies.md", "is_new_page": True,
+        "new_page_content": "# Allergies\n- Penicillin",
+        "contradiction": False, "contradiction_note": None,
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ):
+        await wiki_ingest.ingest_source(
+            patient_id, "note", note_text="Penicillin allergy noted.",
+            db_path=db_path, patients_root=patients_root,
+        )
+
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["status"] == "pending"
+    assert wiki_store.list_wiki_pages(patient_id, root=patients_root) == []
+
+
+async def test_ingest_source_does_not_auto_apply_contradiction_diff(tmp_path):
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": "overview.md", "is_new_page": False,
+        "new_page_content": "updated", "contradiction": True,
+        "contradiction_note": "conflicts with existing note",
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ):
+        await wiki_ingest.ingest_source(
+            patient_id, "note", note_text="Conflicting update.",
+            db_path=db_path, patients_root=patients_root,
+        )
+
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["status"] == "pending"
+    assert wiki_store.list_wiki_pages(patient_id, root=patients_root) == []
+
+
+async def test_ingest_source_auto_apply_failure_does_not_crash_ingest(tmp_path):
+    db_path = tmp_path / "patients.db"
+    patients_root = tmp_path / "patients"
+    wiki_db.init_schema(db_path)
+    patient_id = wiki_db.create_patient("Eleanor Vance", db_path)
+
+    valid_json = json.dumps({
+        "page_path": "overview.md", "is_new_page": True,
+        "new_page_content": "# Overview", "contradiction": False,
+        "contradiction_note": None,
+    })
+    with patch.object(
+        wiki_ingest.llm_client, "query_model", new=AsyncMock(return_value=_fake_response(valid_json))
+    ), patch.object(
+        wiki_ingest.wiki_review, "apply_diff", side_effect=RuntimeError("git commit failed")
+    ):
+        diff_id = await wiki_ingest.ingest_source(
+            patient_id, "note", note_text="General checkup notes.",
+            db_path=db_path, patients_root=patients_root,
+        )
+
+    assert diff_id is not None
+    diffs = wiki_db.list_pending_diffs(patient_id, db_path=db_path)
+    assert diffs[0]["status"] == "pending"

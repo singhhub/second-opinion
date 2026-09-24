@@ -14,7 +14,7 @@ from pydantic import BaseModel, ValidationError
 
 import fitz  # PyMuPDF
 
-from . import llm_client, wiki_db, wiki_store
+from . import config, llm_client, wiki_db, wiki_review, wiki_store
 
 DEFAULT_VISION_MODEL = "claude/claude-sonnet-4-5-20250929"
 
@@ -349,5 +349,19 @@ async def ingest_source(
     )
 
     wiki_db.update_raw_source_status(source_id, "ingested", db_path=db_path)
+
+    if not requires_approval:
+        try:
+            wiki_review.apply_diff(
+                patient_id, diff_id, proposed.page_path, proposed.new_page_content,
+                actor_id=config.AUTO_APPLY_ACTOR_ID, decision="auto_applied",
+                source_id=source_id, db_path=db_path, root=patients_root,
+            )
+        except Exception as e:
+            # Partial-apply failure: pending_diffs stays at its pre-apply
+            # 'pending' status (apply_diff never reached the status update),
+            # surfaced later by a lint routine rather than losing this
+            # ingest's already-written raw_sources/pending_diffs rows.
+            print(f"[wiki_ingest] auto-apply failed for diff {diff_id}: {e}")
 
     return diff_id
