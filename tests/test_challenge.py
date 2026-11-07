@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.challenge import (
     FLAG_CHANGED_WITHOUT_EVIDENCE,
+    FLAG_MUTUAL_CONCESSION,
     FLAG_NO_RECORD_EVIDENCE,
     ChallengeStatus,
     evidence_in_record,
@@ -163,18 +164,76 @@ def _run(items, qm, cls=ClaimState.AGREED, **kw):
     return out, cm
 
 
-def test_both_concede_resolves_and_keeps_original_texts():
+def test_both_concede_is_mutual_capitulation_not_resolved():
     items = _items_conflict()
     qm = AsyncMock(return_value=_resp("CONCEDE"))
     out, cm = _run(items, qm)
-    assert out[0].status == ChallengeStatus.RESOLVED
-    assert out[0].item.item_id == items[0].item_id
-    assert out[0].rounds_used == 1
-    # CONCEDE adopts the other model's position text
-    assert out[0].final_a == items[0].text_b
-    assert out[0].final_b == items[0].text_a
-    assert cm.await_count == 1
+    assert out[0].status == ChallengeStatus.STILL_CONFLICTING
+    assert FLAG_MUTUAL_CONCESSION in out[0].flags
+    assert cm.await_count == 0
     assert qm.await_count == 2
+    assert out[0].item.text_a == items[0].text_a
+    assert out[0].item.text_b == items[0].text_b
+
+
+def test_one_sided_concede_still_resolves_and_keeps_item_texts():
+    items = _items_conflict()
+
+    def side(model, messages, *a, **k):
+        return _resp("CONCEDE") if model == "mA" else _resp("MAINTAIN")
+
+    out, cm = _run(items, AsyncMock(side_effect=side))
+    assert out[0].status == ChallengeStatus.RESOLVED
+    assert cm.await_count == 1
+    assert out[0].final_a == items[0].text_b and out[0].final_b == items[0].text_b
+    assert out[0].item.text_a == items[0].text_a
+    assert out[0].item.text_b == items[0].text_b
+
+
+def test_guard_flag_is_sticky_across_rounds():
+    items = select_challenge_items([_pair("rest at home", "go to ER now")], [], [], []).selected
+    calls = {"mA": 0}
+
+    def side(model, messages, *a, **k):
+        if model == "mB":
+            return _resp("MAINTAIN")
+        calls["mA"] += 1
+        quote = "invented" if calls["mA"] == 1 else "Patient"
+        return _resp("CONCEDE", quote=quote)
+
+    async def honest(pair):
+        return ClaimState.AGREED if pair.claim_a.text == pair.claim_b.text else ClaimState.CONFLICTING
+
+    cm = AsyncMock(side_effect=honest)
+    with patch("backend.challenge.query_model", AsyncMock(side_effect=side)), patch(
+        "backend.challenge.classify_compatibility", cm
+    ):
+        out = asyncio.run(
+            run_challenge_round(
+                items, "Q?", "mA", "mB",
+                record_context="Patient has chest pain.", max_rounds=2,
+            )
+        )
+    assert out[0].status == ChallengeStatus.STILL_CONFLICTING
+    assert FLAG_CHANGED_WITHOUT_EVIDENCE in out[0].flags
+    assert out[0].rounds_used == 2
+
+
+def test_round_two_retries_unresolved_error_items():
+    items = _items_conflict()
+    state = {"n": 0}
+
+    def side(model, messages, *a, **k):
+        state["n"] += 1
+        if state["n"] <= 4:  # round 1: both models, each tried twice
+            return None
+        return _resp("MAINTAIN")
+
+    qm = AsyncMock(side_effect=side)
+    out, _ = _run(items, qm, max_rounds=2)
+    assert out[0].status == ChallengeStatus.STILL_CONFLICTING
+    assert out[0].rounds_used == 2
+    assert qm.await_count == 6
 
 
 def test_one_model_maintains_stays_conflicting_and_makes_no_classify_call():
@@ -304,7 +363,7 @@ def test_round_two_skips_resolved_items():
 
     def side(model, messages, *a, **k):
         if "aspirin 0" in messages[-1]["content"]:
-            return _resp("CONCEDE")
+            return _resp("CONCEDE") if model == "mA" else _resp("MAINTAIN")
         return _resp("MAINTAIN")
 
     qm = AsyncMock(side_effect=side)

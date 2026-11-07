@@ -132,6 +132,7 @@ def select_challenge_items(
 
 FLAG_CHANGED_WITHOUT_EVIDENCE = "changed_without_evidence"
 FLAG_NO_RECORD_EVIDENCE = "resolved_without_record_evidence"
+FLAG_MUTUAL_CONCESSION = "mutual_concession"
 
 CHALLENGE_SYSTEM_PROMPT = """You are a careful medical assistant reviewing a \
 second, independent answer to the same question. You will be shown your own \
@@ -318,8 +319,18 @@ async def _challenge_once(
         state.flags = []
         return
 
-    final_a = _final_position(resp_a, pa, pb) if resp_a else pa
-    final_b = _final_position(resp_b, pb, pa) if resp_b else pb
+    mutual = (
+        resp_a is not None
+        and resp_b is not None
+        and resp_a.stance == ChallengeStance.CONCEDE
+        and resp_b.stance == ChallengeStance.CONCEDE
+    )
+    if mutual:
+        # Both adopting the other's text is a swap, not agreement.
+        final_a, final_b = pa, pb
+    else:
+        final_a = _final_position(resp_a, pa, pb) if resp_a else pa
+        final_b = _final_position(resp_b, pb, pa) if resp_b else pb
     responses = [r for r in (resp_a, resp_b) if r is not None]
     changed = [r for r in responses if r.stance != ChallengeStance.MAINTAIN]
 
@@ -332,15 +343,21 @@ async def _challenge_once(
         if unsupported and FLAG_CHANGED_WITHOUT_EVIDENCE not in flags:
             flags.append(FLAG_CHANGED_WITHOUT_EVIDENCE)
 
+    if mutual and FLAG_MUTUAL_CONCESSION not in flags:
+        flags.append(FLAG_MUTUAL_CONCESSION)
+
+    # The guard flag is sticky across rounds: once set, never RESOLVED.
+    blocked = FLAG_CHANGED_WITHOUT_EVIDENCE in flags
+
     status = ChallengeStatus.STILL_CONFLICTING
-    if changed and final_a is not None and final_b is not None:
+    if changed and not mutual and final_a is not None and final_b is not None:
         verdict = await classify_compatibility(
             ClaimPair(
                 claim_a=Claim(text=final_a, claim_type=_claim_type_for(state.item, "A")),
                 claim_b=Claim(text=final_b, claim_type=_claim_type_for(state.item, "B")),
             )
         )
-        if verdict == ClaimState.AGREED and not unsupported:
+        if verdict == ClaimState.AGREED and not blocked:
             status = ChallengeStatus.RESOLVED
             if record_context is None and FLAG_NO_RECORD_EVIDENCE not in flags:
                 flags.append(FLAG_NO_RECORD_EVIDENCE)
@@ -361,8 +378,8 @@ async def run_challenge_round(
     """Challenge each item; one outcome per input item, same order, never raises.
 
     max_rounds < 1 is treated as 1; the total is capped at
-    CHALLENGE_MAX_ROUNDS_HARD_CAP. Later rounds only re-challenge items that
-    are STILL_CONFLICTING (errors are not retried).
+    CHALLENGE_MAX_ROUNDS_HARD_CAP. Later rounds re-challenge every item that
+    is not RESOLVED (including UNRESOLVED_ERROR items), using current positions.
     """
     states = [_ItemState(item) for item in items]
     rounds = min(max(max_rounds, 1), CHALLENGE_MAX_ROUNDS_HARD_CAP)
@@ -376,7 +393,7 @@ async def run_challenge_round(
             state.pos_a, state.pos_b = state.item.text_a, state.item.text_b
 
     for _ in range(rounds):
-        active = [s for s in states if s.status == ChallengeStatus.STILL_CONFLICTING]
+        active = [s for s in states if s.status != ChallengeStatus.RESOLVED]
         if not active:
             break
         await asyncio.gather(*(guarded(s) for s in active), return_exceptions=True)
