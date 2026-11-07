@@ -170,6 +170,14 @@ _SORT_TOP_CAUSE = 300
 _SORT_ONE_SIDED = 310
 
 _SEVERITY_ORDER = [Severity.HIGH, Severity.MODERATE, Severity.LOW]
+# Most severe first: restrictive actions outrank continue/monitor.
+_MED_ACTION_ORDER = [
+    MedAction.AVOID,
+    MedAction.STOP,
+    MedAction.REDUCE,
+    MedAction.MONITOR,
+    MedAction.CONTINUE,
+]
 
 
 def _top_cause(a: StructuredAssessment) -> Optional[PossibleCause]:
@@ -193,7 +201,12 @@ def _flag_map(a: StructuredAssessment) -> dict:
 def _med_map(a: StructuredAssessment) -> dict:
     out = {}
     for m in a.medication_changes:
-        out.setdefault(m.drug.strip().lower(), m)
+        key = m.drug.strip().lower()
+        prev = out.get(key)
+        if prev is None or _MED_ACTION_ORDER.index(m.action) < _MED_ACTION_ORDER.index(
+            prev.action
+        ):
+            out[key] = m
     return out
 
 
@@ -214,13 +227,11 @@ def compare_structured(
 
     # Urgency
     if a.urgency.level != b.urgency.level:
+        hi_u, lo_u = sorted((a.urgency.level, b.urgency.level), key=urgency_rank)
         out.append(
             StructuredDisagreement(
                 kind=StructuredDisagreementKind.URGENCY,
-                summary=(
-                    f"Urgency differs: {a.urgency.level.value} vs "
-                    f"{b.urgency.level.value}"
-                ),
+                summary=f"Urgency differs: {hi_u.value} vs {lo_u.value}",
                 detail_a=f"Urgency: {a.urgency.level.value}",
                 detail_b=f"Urgency: {b.urgency.level.value}",
                 sort_key=_SORT_URGENCY,
@@ -283,6 +294,8 @@ def compare_structured(
             )
         else:
             present = x if x is not None else y
+            # Silence on a drug is consistent with continue/monitor, so only
+            # restrictive one-sided actions are real disagreements.
             if present.action in (MedAction.CONTINUE, MedAction.MONITOR):
                 continue
             who = "A" if x is not None else "B"

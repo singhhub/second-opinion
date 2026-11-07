@@ -219,3 +219,21 @@ def test_results_sorted_urgency_flags_meds_causes():
         K.ONE_SIDED_CAUSE,
         K.ONE_SIDED_CAUSE,
     ]
+
+
+def test_urgency_summary_names_higher_urgency_first_when_a_is_lower():
+    a = _sa(urgency="routine")
+    b = _sa(urgency="emergency")
+    d = _kinds(compare_structured(a, b), K.URGENCY)[0]
+    assert d.summary.index("emergency") < d.summary.index("routine")
+    assert "routine" in d.detail_a
+    assert "emergency" in d.detail_b
+
+
+def test_duplicate_med_keeps_most_severe_action_regardless_of_order():
+    dup_first = _sa(meds=[("x", "continue"), ("x", "avoid")])
+    dup_last = _sa(meds=[("x", "avoid"), ("x", "continue")])
+    other = _sa(meds=[("x", "continue")])
+    for side in (dup_first, dup_last):
+        assert len(_kinds(compare_structured(side, other), K.MEDICATION_CHANGE)) == 1
+        assert len(_kinds(compare_structured(other, side), K.MEDICATION_CHANGE)) == 1
