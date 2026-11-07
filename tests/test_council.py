@@ -402,3 +402,123 @@ async def test_chairman_message_unchanged_when_no_outcomes():
     assert captured[0] == captured[1] == captured[2]
     assert captured[0][0]["content"] == council.CHAIRMAN_SYSTEM_PROMPT
     assert "CHALLENGE" not in captured[0][1]["content"]
+
+
+# ---- Final-review fixes: structured disagreements, settled tagging, categories ----
+
+def _sd_urgency():
+    from backend.structured_diff import StructuredDisagreement, StructuredDisagreementKind
+    return StructuredDisagreement(
+        kind=StructuredDisagreementKind.URGENCY,
+        summary="Urgency differs: emergency vs within_days",
+        detail_a="Urgency: emergency", detail_b="Urgency: within_days", sort_key=0,
+    )
+
+
+def _sd_top_cause():
+    from backend.structured_diff import StructuredDisagreement, StructuredDisagreementKind
+    return StructuredDisagreement(
+        kind=StructuredDisagreementKind.TOP_CAUSE,
+        summary="Top cause differs: cardiac vs neurological",
+        detail_a="angina (cardiac)", detail_b="stroke (neurological)", sort_key=300,
+    )
+
+
+async def _chairman_messages(*args, **kwargs):
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response(_EMPTY_SUMMARY))
+    ) as mock_query:
+        await council.synthesize_claim_diff_chairman(*args, **kwargs)
+    return mock_query.call_args.args[1]
+
+
+async def test_chairman_gets_structured_section_and_never_says_fully_agreed():
+    msgs = await _chairman_messages(
+        "q", [], [], structured_disagreements=[_sd_urgency(), _sd_top_cause()]
+    )
+    system_prompt, user_message = msgs[0]["content"], msgs[1]["content"]
+    assert "STRUCTURED COMPARISON DISAGREEMENTS" in user_message
+    assert "Urgency differs: emergency vs within_days" in user_message
+    assert "Urgency: emergency" in user_message and "Urgency: within_days" in user_message
+    assert "Top cause differs: cardiac vs neurological" in user_message
+    assert "fully agreed" not in user_message
+    # urgency row tagged, top-cause row not
+    urgency_line = [l for l in user_message.splitlines() if "Urgency differs" in l][0]
+    cause_line = [l for l in user_message.splitlines() if "Top cause differs" in l][0]
+    assert "urgency: always report" in urgency_line
+    assert "urgency: always report" not in cause_line
+    assert system_prompt.startswith(council.CHAIRMAN_SYSTEM_PROMPT)
+    assert council.STRUCTURED_SECTION_NOTE in system_prompt
+    assert council.CHAIRMAN_NEVER_EMERGENCY_RULE in system_prompt
+
+
+async def test_chairman_structured_section_independent_of_challenge_outcomes():
+    from backend.challenge import ChallengeStatus
+    msgs = await _chairman_messages(
+        "q", [], [],
+        challenge_outcomes=[_challenge_outcome(ChallengeStatus.STILL_CONFLICTING)],
+        structured_disagreements=[_sd_urgency()],
+    )
+    user_message = msgs[1]["content"]
+    assert "STRUCTURED COMPARISON DISAGREEMENTS" in user_message
+    assert "CHALLENGE ROUND RESULTS" in user_message
+    assert council.STRUCTURED_SECTION_NOTE in msgs[0]["content"]
+    assert council.CHALLENGE_SECTION_NOTE in msgs[0]["content"]
+
+
+async def test_chairman_message_unchanged_when_no_structured_disagreements():
+    base = await _chairman_messages("q", [], [])
+    for value in (None, []):
+        msgs = await _chairman_messages("q", [], [], structured_disagreements=value)
+        assert msgs == base
+    assert "STRUCTURED" not in base[1]["content"]
+
+
+async def test_chairman_agreed_section_tags_items_settled_after_challenge():
+    from backend.challenge import SettledClaimPair
+    plain = ClaimPair(
+        claim_a=Claim(text="keep a medication list", claim_type=ClaimType.ASSERTION),
+        claim_b=Claim(text="keep a medication list", claim_type=ClaimType.ASSERTION),
+    )
+    settled = SettledClaimPair(
+        claim_a=Claim(text="likely a UTI", claim_type=ClaimType.ASSERTION),
+        claim_b=Claim(text="likely a UTI", claim_type=ClaimType.ASSERTION),
+        original_a="likely a UTI", original_b="likely a drug side effect",
+    )
+    msgs = await _chairman_messages("q", [plain, settled], [])
+    user_message = msgs[1]["content"]
+    lines = user_message.splitlines()
+    plain_line = [l for l in lines if "keep a medication list" in l][0]
+    settled_line = [l for l in lines if l.startswith("- likely a UTI")][0]
+    assert plain_line == "- keep a medication list"
+    assert "settled after challenge" in settled_line
+    assert 'originally Model A: "likely a UTI"' in settled_line
+    assert 'Model B: "likely a drug side effect"' in settled_line
+
+
+async def test_chairman_challenge_section_names_category_and_tags_red_flags():
+    from backend.challenge import ChallengeItem, ChallengeOutcome, ChallengeStatus
+    from backend.claim_diff import ActionabilityCategory
+
+    def outcome(cat, always_visible=False, text="T"):
+        item = ChallengeItem(
+            item_id="x", source="structured" if always_visible else "conflicting",
+            category=cat, text_a=text + " A", text_b=text + " B",
+            always_visible=always_visible,
+        )
+        return ChallengeOutcome(item=item, final_a="fa", final_b="fb",
+                                status=ChallengeStatus.STILL_CONFLICTING)
+
+    msgs = await _chairman_messages("q", [], [], challenge_outcomes=[
+        outcome(ActionabilityCategory.RISK_OR_RED_FLAG, always_visible=True, text="URG"),
+        outcome(ActionabilityCategory.RISK_OR_RED_FLAG, text="RED"),
+        outcome(ActionabilityCategory.DIAGNOSTIC_SUGGESTION, text="DIAG"),
+    ])
+    user_message = msgs[1]["content"]
+    section = user_message.split("CHALLENGE ROUND RESULTS")[1]
+    entries = section.split("\n- ")[1:]
+    assert len(entries) == 3
+    assert "RISK_OR_RED_FLAG" in entries[0] and "urgency/red flag: always report" in entries[0]
+    assert "RISK_OR_RED_FLAG" in entries[1] and "urgency/red flag: always report" in entries[1]
+    assert "DIAGNOSTIC_SUGGESTION" in entries[2]
+    assert "always report" not in entries[2]

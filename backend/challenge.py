@@ -117,7 +117,11 @@ def select_challenge_items(
     if not pool and all_unconfirmed:
         pool = all_unconfirmed[:CHALLENGE_FALLBACK_ITEMS]
 
-    ordered = sorted(pool, key=lambda item: item.category.value)  # stable
+    # always_visible (urgency) items first so the cap can never defer them,
+    # then actionability order; sorted() is stable within each key.
+    ordered = sorted(
+        pool, key=lambda item: (not item.always_visible, item.category.value)
+    )
     limit = max(max_items, 0)
     selected = ordered[:limit]
     deferred = ordered[limit:]
@@ -401,12 +405,26 @@ async def run_challenge_round(
     return [s.outcome() for s in states]
 
 
+class SettledClaimPair(ClaimPair):
+    """A pair that joined the agreed list only after the challenge round.
+
+    Carries both models' original positions so the chairman can tag it as
+    settled after challenge rather than presenting it as plain consensus.
+    """
+
+    original_a: Optional[str] = None
+    original_b: Optional[str] = None
+
+
 def _movable(outcome: ChallengeOutcome) -> bool:
     item = outcome.item
     return (
         outcome.status == ChallengeStatus.RESOLVED
         and item.source != "structured"
         and not item.always_visible
+        # A red-flag concession (e.g. the ER side backing down) must not read
+        # as consensus: it stays in the human diff; its outcome is still shown.
+        and item.category != ActionabilityCategory.RISK_OR_RED_FLAG
         and outcome.final_a is not None
         and outcome.final_b is not None
     )
@@ -421,8 +439,9 @@ def apply_challenge_outcomes(
     """Fold RESOLVED outcomes into a newly-agreed list.
 
     Returns (newly_agreed, conflicting, unconfirmed_a, unconfirmed_b). Only
-    RESOLVED, non-structured, non-always-visible outcomes with both final
-    positions move; everything else stays put. Items are matched back to the
+    RESOLVED, non-structured, non-always-visible, non-RISK_OR_RED_FLAG
+    outcomes with both final positions move; everything else stays put.
+    Moved items are SettledClaimPair (final texts plus original positions). Items are matched back to the
     input lists by identity. Lossless: each input item is in exactly one list.
     """
     moved_pairs: set = set()
@@ -450,9 +469,11 @@ def apply_challenge_outcomes(
         else:
             continue
         newly_agreed.append(
-            ClaimPair(
+            SettledClaimPair(
                 claim_a=Claim(text=outcome.final_a, claim_type=type_a),
                 claim_b=Claim(text=outcome.final_b, claim_type=type_b),
+                original_a=item.text_a,
+                original_b=item.text_b,
             )
         )
 

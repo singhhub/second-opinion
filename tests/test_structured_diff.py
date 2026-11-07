@@ -87,6 +87,26 @@ def test_split_missing_closing_tag_counts_as_no_block():
     assert "Prose" in text
 
 
+def test_split_truncated_block_is_cut_from_free_text():
+    """A truncated answer must not leak raw JSON into the tab or extraction."""
+    truncated = 'Answer prose here.\n<structured>\n{"possible_causes": [{"name": "mig'
+    text, block = split_structured_block(truncated)
+    assert block is None
+    assert text == "Answer prose here."
+    assert "<structured>" not in text
+    assert "possible_causes" not in text
+
+
+def test_split_unclosed_tag_after_complete_block_is_cut():
+    text, block = split_structured_block(
+        "Prose " + _wrap(BLOCK) + " tail <structured>{\"x\": 1"
+    )
+    assert block is not None
+    assert "<structured>" not in text
+    assert '"x"' not in text
+    assert "Prose" in text and "tail" in text
+
+
 def test_urgency_rank_orders_emergency_first():
     assert sd.urgency_rank(UrgencyLevel.EMERGENCY) == 0
     assert sd.urgency_rank(UrgencyLevel.ROUTINE) == 3

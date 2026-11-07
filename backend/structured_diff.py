@@ -120,7 +120,9 @@ def split_structured_block(
     """Split a response into (free text without the block, parsed block or None).
 
     Uses the first complete <structured>...</structured> block. A missing
-    closing tag counts as no block (text returned unchanged). Never raises.
+    closing tag (e.g. a truncated answer) counts as no block, and the free
+    text is cut at the unclosed opening tag so raw JSON never leaks into the
+    answer shown to the user or into claim extraction. Never raises.
     """
     try:
         start = response_text.find(_OPEN)
@@ -128,13 +130,18 @@ def split_structured_block(
             return response_text, None
         end = response_text.find(_CLOSE, start + len(_OPEN))
         if end == -1:
-            return response_text, None
+            return response_text[:start].strip(), None
         raw = response_text[start + len(_OPEN):end]
         free = response_text[:start] + response_text[end + len(_CLOSE):]
         # Drop any further blocks from the free text as well.
         free = re.sub(
             re.escape(_OPEN) + r".*?" + re.escape(_CLOSE), "", free, flags=re.DOTALL
-        ).strip()
+        )
+        # ...and cut at any remaining unclosed opening tag.
+        unclosed = free.find(_OPEN)
+        if unclosed != -1:
+            free = free[:unclosed]
+        free = free.strip()
         try:
             block = StructuredAssessment.model_validate_json(
                 llm_client.strip_json_fence(raw)

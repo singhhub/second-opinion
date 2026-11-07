@@ -113,6 +113,27 @@ def test_cap_applies_in_actionability_order_and_sets_cap_hit():
     assert all(i.category == ActionabilityCategory.BACKGROUND_OR_CAVEAT for i in sel.deferred)
 
 
+def test_cap_never_defers_urgency_item_behind_higher_priority_items():
+    """Spec: urgency is always challenged, even when >cap drug items qualify."""
+    drug = [_sd(StructuredDisagreementKind.INTERACTION_FLAG) for _ in range(12)]
+    urgency = _sd(StructuredDisagreementKind.URGENCY)
+    sel = select_challenge_items([], [], [], drug + [urgency], max_items=10)
+    assert sel.cap_hit is True
+    urgent_selected = [i for i in sel.selected if i.always_visible]
+    assert len(urgent_selected) == 1
+    assert urgent_selected[0].item_id == "s12"
+    assert all(not i.always_visible for i in sel.deferred)
+    assert len(sel.selected) == 10
+
+
+def test_cap_ordering_keeps_category_order_after_always_visible():
+    pairs = [_pair("dose too high", "dose fine")]  # DRUG_INTERACTION
+    urgency = _sd(StructuredDisagreementKind.URGENCY)
+    top = _sd(StructuredDisagreementKind.TOP_CAUSE)
+    sel = select_challenge_items(pairs, [], [], [top, urgency], max_items=10)
+    assert _ids(sel.selected) == ["s1", "c0", "s0"]
+
+
 def test_selection_is_lossless():
     pairs = [_pair("dose too high", "dose fine"), _pair("x", "y")]
     ua = [_claim("consistent with A"), _claim("monitor weight"), _claim("trivia")]
@@ -450,6 +471,42 @@ def test_resolved_urgency_structured_item_does_not_move():
     out = ChallengeOutcome(item=item, final_a="x", final_b="x", status=ChallengeStatus.RESOLVED)
     agreed, conflicting, ua, ub = apply_challenge_outcomes([p1], [], [], [out])
     assert agreed == [] and conflicting == [p1] and ua == [] and ub == []
+
+
+def test_resolved_red_flag_conflict_stays_in_conflicting():
+    """An ER-side concession must not read as consensus."""
+    p1 = _pair("seek emergency care now", "watch at home")
+    item = ChallengeItem(
+        item_id="c0", source="conflicting",
+        category=ActionabilityCategory.RISK_OR_RED_FLAG,
+        text_a=p1.claim_a.text, text_b=p1.claim_b.text, pair=p1,
+    )
+    out = ChallengeOutcome(item=item, final_a="watch at home", final_b="watch at home",
+                           status=ChallengeStatus.RESOLVED)
+    agreed, conflicting, ua, ub = apply_challenge_outcomes([p1], [], [], [out])
+    assert agreed == [] and conflicting == [p1]
+
+
+def test_resolved_red_flag_unconfirmed_stays_in_unconfirmed():
+    c1 = _claim("risk of stroke")
+    item = ChallengeItem(
+        item_id="u0", source="unconfirmed",
+        category=ActionabilityCategory.RISK_OR_RED_FLAG,
+        text_a=c1.text, text_b=None, claim=c1, side="A",
+    )
+    out = ChallengeOutcome(item=item, final_a="x", final_b="x", status=ChallengeStatus.RESOLVED)
+    agreed, _, ua, _ = apply_challenge_outcomes([], [c1], [], [out])
+    assert agreed == [] and ua == [c1]
+
+
+def test_moved_pair_carries_original_texts_for_tagging():
+    from backend.challenge import SettledClaimPair
+    p1 = _pair("orig a", "orig b")
+    out = _conflict_outcome(p1, ChallengeStatus.RESOLVED, "same", "same")
+    agreed, _, _, _ = apply_challenge_outcomes([p1], [], [], [out])
+    assert isinstance(agreed[0], SettledClaimPair)
+    assert agreed[0].original_a == "orig a"
+    assert agreed[0].original_b == "orig b"
 
 
 def test_unconfirmed_resolved_leaves_unconfirmed_list_and_joins_agreed():

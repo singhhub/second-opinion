@@ -156,8 +156,14 @@ async def analyze_question(request: AnalyzeRequest):
             unconfirmed_b=unconfirmed_b,
         )
 
+        # Structured disagreements go to the chairman on every path (even when
+        # the challenge step failed), independent of challenge outcomes.
         chairman_result = await synthesize_claim_diff_chairman(
-            request.question, agreed, diff_items, challenge_outcomes=outcomes
+            request.question,
+            agreed,
+            diff_items,
+            challenge_outcomes=outcomes,
+            structured_disagreements=disagreements,
         )
         summary = chairman_result["structured"]
     except Exception:
@@ -189,10 +195,13 @@ async def analyze_question(request: AnalyzeRequest):
             },
         ],
         "counts": {
-            "agreed": len(agreed),
+            # Items settled after challenge are counted only in
+            # resolved_after_challenge, never as plain agreement.
+            "agreed": len(agreed) - len(newly_agreed),
             "conflicting": len(conflicting),
             "unconfirmed": len(unconfirmed_a) + len(unconfirmed_b),
             "resolved_after_challenge": len(newly_agreed),
+            "structured_disagreements": len(disagreements),
         },
         "challenge": challenge,
         "structured": {

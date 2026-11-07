@@ -67,7 +67,10 @@ def test_analyze_returns_structured_result_on_success():
     assert response.status_code == 200
     body = response.json()
     assert body["degraded"] is False
-    assert body["counts"] == {"agreed": 0, "conflicting": 0, "unconfirmed": 2, "resolved_after_challenge": 0}
+    assert body["counts"] == {
+        "agreed": 0, "conflicting": 0, "unconfirmed": 2,
+        "resolved_after_challenge": 0, "structured_disagreements": 0,
+    }
     assert body["summary"]["disagreement_summary"] == "they disagree"
     assert body["summary"]["questions_for_doctor"] == ["ask this"]
     assert body["models"][0]["name"] == COUNCIL_MODELS[0].partition("/")[0].capitalize()
@@ -132,7 +135,10 @@ def test_analyze_counts_reflect_classify_compatibility_result():
 
     assert response.status_code == 200
     body = response.json()
-    assert body["counts"] == {"agreed": 1, "conflicting": 0, "unconfirmed": 0, "resolved_after_challenge": 0}
+    assert body["counts"] == {
+        "agreed": 1, "conflicting": 0, "unconfirmed": 0,
+        "resolved_after_challenge": 0, "structured_disagreements": 0,
+    }
 
 
 def test_analyze_returns_degraded_when_pipeline_raises_mid_stream():
@@ -193,9 +199,10 @@ def _pair():
     )
 
 
-def _outcome(pair, status, final_a="a says x", final_b="a says x"):
+def _outcome(pair, status, final_a="a says x", final_b="a says x",
+             category=ActionabilityCategory.DIAGNOSTIC_SUGGESTION, item_id="c0"):
     item = ChallengeItem(
-        item_id="c0", source="conflicting", category=ActionabilityCategory.RISK_OR_RED_FLAG,
+        item_id=item_id, source="conflicting", category=category,
         text_a=pair.claim_a.text, text_b=pair.claim_b.text, pair=pair,
     )
     return ChallengeOutcome(item=item, final_a=final_a, final_b=final_b, status=status, flags=["f"], rounds_used=1)
@@ -208,8 +215,10 @@ def test_analyze_resolved_conflict_counts_as_agreed_and_keeps_original_in_challe
     _no_network_challenge.return_value = [_outcome(pair, ChallengeStatus.RESOLVED)]
     body, chairman = _run([pair], [], [])
 
+    # Settled items are counted only in resolved_after_challenge, not agreed.
     assert body["counts"] == {
-        "agreed": 1, "conflicting": 0, "unconfirmed": 0, "resolved_after_challenge": 1,
+        "agreed": 0, "conflicting": 0, "unconfirmed": 0, "resolved_after_challenge": 1,
+        "structured_disagreements": 0,
     }
     ch = body["challenge"]
     assert ch["ran"] is True and ch["error"] is None
@@ -217,7 +226,7 @@ def test_analyze_resolved_conflict_counts_as_agreed_and_keeps_original_in_challe
     assert ch["items"][0]["original_b"] == "b says y"
     assert ch["items"][0]["final_b"] == "a says x"
     assert ch["items"][0]["id"] == "c0"
-    assert ch["items"][0]["category"] == "RISK_OR_RED_FLAG"
+    assert ch["items"][0]["category"] == "DIAGNOSTIC_SUGGESTION"
     assert ch["items"][0]["flags"] == ["f"]
     assert chairman.call_args.kwargs["challenge_outcomes"] is not None
 
@@ -316,3 +325,83 @@ def test_ui_route_serves_html_file():
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert b"Second Opinion" in response.content
+
+
+# ---- Final-review fixes ----
+
+def _urgency_sd():
+    return StructuredDisagreement(
+        kind=StructuredDisagreementKind.URGENCY,
+        summary="Urgency differs: emergency vs within_days",
+        detail_a="Urgency: emergency", detail_b="Urgency: within_days", sort_key=0,
+    )
+
+
+def _stage1_with_blocks():
+    stage1 = _stage1_ok()
+    stage1[0]["structured"] = _assessment(UrgencyLevel.EMERGENCY)
+    stage1[1]["structured"] = _assessment(UrgencyLevel.WITHIN_DAYS)
+    return stage1
+
+
+def test_analyze_resolved_red_flag_conflict_stays_in_diff(_no_network_challenge):
+    pair = _pair()
+    _no_network_challenge.return_value = [
+        _outcome(pair, ChallengeStatus.RESOLVED, category=ActionabilityCategory.RISK_OR_RED_FLAG)
+    ]
+    body, chairman = _run([pair], [], [])
+
+    assert body["counts"]["conflicting"] == 1
+    assert body["counts"]["agreed"] == 0
+    assert body["counts"]["resolved_after_challenge"] == 0
+    assert body["challenge"]["items"][0]["status"] == "resolved"
+    assert chairman.call_args.args[1] == []
+
+
+def test_analyze_challenge_status_strings_are_exact(_no_network_challenge):
+    p1, p2, p3 = _pair(), _pair(), _pair()
+    _no_network_challenge.return_value = [
+        _outcome(p1, ChallengeStatus.RESOLVED, item_id="c0"),
+        _outcome(p2, ChallengeStatus.STILL_CONFLICTING, item_id="c1"),
+        _outcome(p3, ChallengeStatus.UNRESOLVED_ERROR, item_id="c2"),
+    ]
+    body, _ = _run([p1, p2, p3], [], [])
+
+    assert [i["status"] for i in body["challenge"]["items"]] == [
+        "resolved", "still_conflicting", "unresolved_error",
+    ]
+
+
+def test_analyze_structured_disagreements_reach_chairman_and_counts(_no_network_challenge):
+    sd = _urgency_sd()
+    body, chairman = _run(
+        [], [], [], stage1=_stage1_with_blocks(),
+        patches=[patch.object(main, "compare_structured", return_value=[sd])],
+    )
+
+    assert body["counts"]["structured_disagreements"] == 1
+    assert chairman.call_args.kwargs["structured_disagreements"] == [sd]
+
+
+def test_analyze_structured_disagreements_reach_chairman_when_challenge_fails(
+    _no_network_challenge,
+):
+    _no_network_challenge.side_effect = RuntimeError("boom")
+    sd = _urgency_sd()
+    body, chairman = _run(
+        [], [], [], stage1=_stage1_with_blocks(),
+        patches=[patch.object(main, "compare_structured", return_value=[sd])],
+    )
+
+    assert body["challenge"]["error"]
+    assert chairman.call_args.kwargs["challenge_outcomes"] is None
+    assert chairman.call_args.kwargs["structured_disagreements"] == [sd]
+    assert body["counts"]["structured_disagreements"] == 1
+    assert len(body["structured"]["disagreements"]) == 1
+
+
+def test_analyze_structured_count_zero_when_unavailable():
+    body, chairman = _run([], [], [])
+
+    assert body["counts"]["structured_disagreements"] == 0
+    assert chairman.call_args.kwargs["structured_disagreements"] == []

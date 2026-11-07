@@ -10,10 +10,18 @@ from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
 from .structured_diff import (
     STRUCTURED_BLOCK_INSTRUCTION,
     StructuredAssessment,
+    StructuredDisagreement,
+    StructuredDisagreementKind,
     split_structured_block,
 )
-from .claim_diff import Claim, ClaimPair, ClaimState, categorize_claim
-from .challenge import ChallengeOutcome
+from .claim_diff import (
+    ActionabilityCategory,
+    Claim,
+    ClaimPair,
+    ClaimState,
+    categorize_claim,
+)
+from .challenge import ChallengeOutcome, SettledClaimPair
 
 
 class ObservationGroup(BaseModel):
@@ -186,14 +194,36 @@ def build_ranked_diff_items(
     return items
 
 
+def _quoted_position(text: Optional[str]) -> str:
+    return "(no position)" if text is None else f'"{text}"'
+
+
+def _format_agreed_line(pair: ClaimPair) -> str:
+    if isinstance(pair, SettledClaimPair):
+        return (
+            f"- {pair.claim_a.text} (settled after challenge; originally "
+            f"Model A: {_quoted_position(pair.original_a)}; "
+            f"Model B: {_quoted_position(pair.original_b)})"
+        )
+    return f"- {pair.claim_a.text}"
+
+
 def _format_agreed_section(agreed: List[ClaimPair]) -> str:
     if not agreed:
         return "No agreed findings - the two models did not converge on any claim."
-    return "\n".join(f"- {pair.claim_a.text}" for pair in agreed)
+    return "\n".join(_format_agreed_line(pair) for pair in agreed)
 
 
-def _format_diff_section(items: List[Dict[str, Any]]) -> str:
+def _format_diff_section(
+    items: List[Dict[str, Any]], has_structured_disagreements: bool = False
+) -> str:
     if not items:
+        if has_structured_disagreements:
+            return (
+                "No conflicting or unconfirmed claims in the claim comparison, but "
+                "the models still disagree - see the STRUCTURED COMPARISON "
+                "DISAGREEMENTS section below."
+            )
         return "No conflicting or unconfirmed claims - the two models fully agreed."
 
     lines = []
@@ -234,6 +264,22 @@ The user message also contains a CHALLENGE ROUND RESULTS section. It lists disag
 - Never soften or omit a source model's own emergency or urgent recommendation, even if that item is RESOLVED. Urgency disagreements are always reported."""
 
 
+STRUCTURED_SECTION_NOTE = """
+
+The user message also contains a STRUCTURED COMPARISON DISAGREEMENTS section. It lists differences found by comparing the two models' machine-readable summaries (possible causes, interaction flags, medication changes, urgency) field by field. These are real disagreements between the two models even when the claim list shows none, so include them in disagreement_summary - never describe the models as fully agreeing while this section has entries.
+- A row tagged "urgency: always report" is an urgency-level disagreement: always name both models' urgency levels, and never soften or omit the more urgent one."""
+
+
+def _format_structured_section(disagreements: List[StructuredDisagreement]) -> str:
+    lines = []
+    for d in disagreements:
+        line = f"- {d.summary} (Model A: {d.detail_a}; Model B: {d.detail_b})"
+        if d.kind == StructuredDisagreementKind.URGENCY:
+            line += " [urgency: always report]"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _format_challenge_section(outcomes: List[ChallengeOutcome]) -> str:
     def pos(text: Optional[str]) -> str:
         return "(none)" if text is None else f'"{text}"'
@@ -241,8 +287,15 @@ def _format_challenge_section(outcomes: List[ChallengeOutcome]) -> str:
     lines = []
     for o in outcomes:
         flags = ", ".join(o.flags) if o.flags else "none"
+        tag = ""
+        if (
+            o.item.always_visible
+            or o.item.category == ActionabilityCategory.RISK_OR_RED_FLAG
+        ):
+            tag = " [urgency/red flag: always report]"
         lines.append(
-            f"- Status: {o.status.value}; flags: {flags}\n"
+            f"- Category: {o.item.category.name}{tag}; "
+            f"Status: {o.status.value}; flags: {flags}\n"
             f"  Original: Model A {pos(o.item.text_a)}; Model B {pos(o.item.text_b)}\n"
             f"  Final: Model A {pos(o.final_a)}; Model B {pos(o.final_b)}"
         )
@@ -278,6 +331,7 @@ async def synthesize_claim_diff_chairman(
     ranked_diff_items: List[Dict[str, Any]],
     chairman_model: str = CHAIRMAN_MODEL,
     challenge_outcomes: Optional[List[ChallengeOutcome]] = None,
+    structured_disagreements: Optional[List[StructuredDisagreement]] = None,
 ) -> Dict[str, Any]:
     """
     Chairman synthesis for the claim-diff mechanism.
@@ -289,9 +343,15 @@ async def synthesize_claim_diff_chairman(
     object for callers that render it (the API endpoint); "response" is a
     flattened plain-text rendition for callers that only need to judge text
     (eval_harness's retention check).
+
+    structured_disagreements (from compare_structured) are given to the
+    chairman as their own section, independent of challenge outcomes; when
+    None or empty, the messages sent are unchanged.
     """
     agreed_text = _format_agreed_section(agreed)
-    diff_text = _format_diff_section(ranked_diff_items)
+    diff_text = _format_diff_section(
+        ranked_diff_items, has_structured_disagreements=bool(structured_disagreements)
+    )
 
     user_message = f"""Original Question: {user_query}
 
@@ -302,12 +362,19 @@ CONFLICTING / UNCONFIRMED CLAIMS (ranked by actionability, most important first)
 {diff_text}"""
 
     system_prompt = CHAIRMAN_SYSTEM_PROMPT
+    if structured_disagreements:
+        user_message += (
+            "\n\nSTRUCTURED COMPARISON DISAGREEMENTS (from each model's "
+            "machine-readable summary; reported independently of the claims "
+            "above):\n" + _format_structured_section(structured_disagreements)
+        )
+        system_prompt += STRUCTURED_SECTION_NOTE
     if challenge_outcomes:
         user_message += (
             "\n\nCHALLENGE ROUND RESULTS (disagreements the two models were "
             "asked to reconsider):\n" + _format_challenge_section(challenge_outcomes)
         )
-        system_prompt = CHAIRMAN_SYSTEM_PROMPT + CHALLENGE_SECTION_NOTE
+        system_prompt += CHALLENGE_SECTION_NOTE
 
     messages = [
         {"role": "system", "content": system_prompt},
