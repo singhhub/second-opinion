@@ -1,5 +1,22 @@
-from backend.challenge import select_challenge_items
-from backend.claim_diff import ActionabilityCategory, Claim, ClaimPair, ClaimType
+import asyncio
+import json
+from unittest.mock import AsyncMock, patch
+
+from backend.challenge import (
+    FLAG_CHANGED_WITHOUT_EVIDENCE,
+    FLAG_NO_RECORD_EVIDENCE,
+    ChallengeStatus,
+    evidence_in_record,
+    run_challenge_round,
+    select_challenge_items,
+)
+from backend.claim_diff import (
+    ActionabilityCategory,
+    Claim,
+    ClaimPair,
+    ClaimState,
+    ClaimType,
+)
 from backend.structured_diff import StructuredDisagreement, StructuredDisagreementKind
 
 
@@ -113,3 +130,206 @@ def test_fallback_items_count_toward_cap():
     assert len(sel.selected) == 2
     assert len(sel.deferred) == 1  # fallback picks 3, cap keeps 2
     assert sel.cap_hit is True
+
+
+# ---- Task 5: run_challenge_round ----
+
+def _resp(stance, revised=None, quote=None):
+    return {
+        "content": json.dumps(
+            {
+                "stance": stance,
+                "revised_claim": revised,
+                "reasoning": "because",
+                "evidence_quote": quote,
+            }
+        )
+    }
+
+
+def _items_conflict(n=1):
+    sel = select_challenge_items(
+        [_pair(f"takes aspirin {i}", f"avoid aspirin {i}") for i in range(n)], [], [], []
+    )
+    return sel.selected
+
+
+def _run(items, qm, cls=ClaimState.AGREED, **kw):
+    cm = AsyncMock(return_value=cls)
+    with patch("backend.challenge.query_model", qm), patch(
+        "backend.challenge.classify_compatibility", cm
+    ):
+        out = asyncio.run(run_challenge_round(items, "Q?", "mA", "mB", **kw))
+    return out, cm
+
+
+def test_both_concede_resolves_and_keeps_original_texts():
+    items = _items_conflict()
+    qm = AsyncMock(return_value=_resp("CONCEDE"))
+    out, cm = _run(items, qm)
+    assert out[0].status == ChallengeStatus.RESOLVED
+    assert out[0].item.item_id == items[0].item_id
+    assert out[0].rounds_used == 1
+    # CONCEDE adopts the other model's position text
+    assert out[0].final_a == items[0].text_b
+    assert out[0].final_b == items[0].text_a
+    assert cm.await_count == 1
+    assert qm.await_count == 2
+
+
+def test_one_model_maintains_stays_conflicting_and_makes_no_classify_call():
+    out, cm = _run(_items_conflict(), AsyncMock(return_value=_resp("MAINTAIN")))
+    assert out[0].status == ChallengeStatus.STILL_CONFLICTING
+    assert cm.await_count == 0
+
+
+def test_malformed_json_twice_gives_unresolved_error():
+    items = _items_conflict()
+    qm = AsyncMock(return_value={"content": "not json"})
+    out, _ = _run(items, qm)
+    assert out[0].status == ChallengeStatus.UNRESOLVED_ERROR
+    assert out[0].final_a == items[0].text_a and out[0].final_b == items[0].text_b
+    assert out[0].flags == []
+
+
+def test_one_of_two_calls_failing_gives_unresolved_error():
+    def side(model, messages, *a, **k):
+        return None if model == "mB" else _resp("CONCEDE")
+
+    out, cm = _run(_items_conflict(), AsyncMock(side_effect=side))
+    assert out[0].status == ChallengeStatus.UNRESOLVED_ERROR
+    assert cm.await_count == 0
+
+
+def test_malformed_then_valid_retries_once():
+    seq = {"mA": [{"content": "junk"}, _resp("MAINTAIN")], "mB": [_resp("MAINTAIN")]}
+
+    def side(model, messages, *a, **k):
+        return seq[model].pop(0)
+
+    out, _ = _run(_items_conflict(), AsyncMock(side_effect=side))
+    assert out[0].status == ChallengeStatus.STILL_CONFLICTING
+
+
+def test_revise_without_revised_claim_is_malformed():
+    out, _ = _run(_items_conflict(), AsyncMock(return_value=_resp("REVISE")))
+    assert out[0].status == ChallengeStatus.UNRESOLVED_ERROR
+
+
+def test_unexpected_exception_isolated_to_item():
+    items = _items_conflict(2)
+
+    def side(model, messages, *a, **k):
+        if "aspirin 0" in messages[-1]["content"]:
+            raise RuntimeError("boom")
+        return _resp("MAINTAIN")
+
+    out, _ = _run(items, AsyncMock(side_effect=side))
+    assert [o.status for o in out] == [
+        ChallengeStatus.UNRESOLVED_ERROR,
+        ChallengeStatus.STILL_CONFLICTING,
+    ]
+
+
+def test_changed_position_with_fabricated_quote_stays_conflicting_when_record_supplied():
+    qm = AsyncMock(return_value=_resp("REVISE", revised="new view", quote="invented text"))
+    out, cm = _run(_items_conflict(), qm, record_context="Patient takes warfarin daily.")
+    assert out[0].status == ChallengeStatus.STILL_CONFLICTING
+    assert FLAG_CHANGED_WITHOUT_EVIDENCE in out[0].flags
+
+
+def test_changed_position_with_real_quote_resolves_when_record_supplied():
+    qm = AsyncMock(
+        return_value=_resp("REVISE", revised="new view", quote="takes  warfarin\ndaily")
+    )
+    out, _ = _run(_items_conflict(), qm, record_context="Patient takes warfarin daily.")
+    assert out[0].status == ChallengeStatus.RESOLVED
+    assert out[0].flags == []
+
+
+def test_changed_position_without_record_resolves_with_no_record_evidence_flag():
+    qm = AsyncMock(return_value=_resp("REVISE", revised="new view"))
+    out, _ = _run(_items_conflict(), qm)
+    assert out[0].status == ChallengeStatus.RESOLVED
+    assert FLAG_NO_RECORD_EVIDENCE in out[0].flags
+
+
+def test_reclassified_conflicting_stays_conflicting():
+    qm = AsyncMock(return_value=_resp("REVISE", revised="new view"))
+    out, _ = _run(_items_conflict(), qm, cls=ClaimState.CONFLICTING, max_rounds=1)
+    assert out[0].status == ChallengeStatus.STILL_CONFLICTING
+    assert out[0].flags == []
+
+
+def test_evidence_in_record_accepts_whitespace_difference_rejects_paraphrase():
+    rec = "Patient   takes\nwarfarin  daily."
+    assert evidence_in_record("takes warfarin daily", rec)
+    assert not evidence_in_record("Takes warfarin daily", rec)
+    assert not evidence_in_record("is on warfarin every day", rec)
+    assert not evidence_in_record(None, rec)
+    assert not evidence_in_record("   ", rec)
+
+
+def test_unconfirmed_item_only_asks_the_other_model():
+    sel = select_challenge_items([], [_claim("risk of bleeding")], [], [])
+    qm = AsyncMock(return_value=_resp("CONCEDE"))
+    out, _ = _run(sel.selected, qm)
+    assert qm.await_count == 1
+    assert qm.await_args.args[0] == "mB"
+    assert out[0].status == ChallengeStatus.RESOLVED
+    assert out[0].final_a == "risk of bleeding" and out[0].final_b == "risk of bleeding"
+
+
+def test_unconfirmed_maintain_is_still_conflicting_without_classify():
+    sel = select_challenge_items([], [], [_claim("risk of bleeding")], [])
+    qm = AsyncMock(return_value=_resp("MAINTAIN"))
+    out, cm = _run(sel.selected, qm)
+    assert qm.await_args.args[0] == "mA"
+    assert out[0].status == ChallengeStatus.STILL_CONFLICTING
+    assert out[0].final_a is None and out[0].final_b == "risk of bleeding"
+    assert cm.await_count == 0
+
+
+def test_rounds_default_one_and_never_exceed_two():
+    qm = AsyncMock(return_value=_resp("MAINTAIN"))
+    out, _ = _run(_items_conflict(), qm)
+    assert qm.await_count == 2 and out[0].rounds_used == 1
+    qm = AsyncMock(return_value=_resp("MAINTAIN"))
+    out, _ = _run(_items_conflict(), qm, max_rounds=5)
+    assert qm.await_count == 4 and out[0].rounds_used == 2
+
+
+def test_round_two_skips_resolved_items():
+    items = _items_conflict(2)
+
+    def side(model, messages, *a, **k):
+        if "aspirin 0" in messages[-1]["content"]:
+            return _resp("CONCEDE")
+        return _resp("MAINTAIN")
+
+    qm = AsyncMock(side_effect=side)
+    out, _ = _run(items, qm, max_rounds=2)
+    assert out[0].status == ChallengeStatus.RESOLVED and out[0].rounds_used == 1
+    assert out[1].status == ChallengeStatus.STILL_CONFLICTING and out[1].rounds_used == 2
+    assert qm.await_count == 2 + 2 + 2
+
+
+def test_outcomes_one_per_item_in_order():
+    items = _items_conflict(3)
+    out, _ = _run(items, AsyncMock(return_value=_resp("MAINTAIN")))
+    assert [o.item.item_id for o in out] == [i.item_id for i in items]
+
+
+def test_no_items_makes_no_calls():
+    qm = AsyncMock()
+    out, cm = _run([], qm)
+    assert out == [] and qm.await_count == 0 and cm.await_count == 0
+
+
+def test_prompt_includes_record_and_does_not_name_provider():
+    qm = AsyncMock(return_value=_resp("MAINTAIN"))
+    _run(_items_conflict(), qm, record_context="RECORD-XYZ")
+    for call in qm.await_args_list:
+        blob = json.dumps(call.args[1])
+        assert "RECORD-XYZ" in blob and "Q?" in blob
+        assert "mA" not in blob and "mB" not in blob
