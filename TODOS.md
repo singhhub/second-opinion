@@ -8,9 +8,11 @@
 `backend/eval_harness.py`'s `run_new_mechanism` now both inline the same
 7-stage pipeline (extract_claims x2 -> align_claims -> classify_compatibility
 per pair -> structured compare + challenge round -> build_ranked_diff_items ->
-synthesize_claim_diff_chairman). The challenge step (compare_structured,
-select_challenge_items, run_challenge_round, apply_challenge_outcomes) is
-duplicated too.
+synthesize_claim_diff_chairman). The challenge step (select_challenge_items,
+run_challenge_round, apply_challenge_outcomes, and the record_context=None
+argument) is duplicated too. Note the eval harness skips the structured step
+entirely (no structured block request, no compare_structured, `[]` passed as
+disagreements), so structured/urgency behavior has no offline eval coverage.
 Extract a shared `async def run_claim_diff_pipeline(question, response_a,
 response_b) -> (agreed, conflicting, alignment, diff_items)` into
 `claim_diff.py` or `council.py` and call it from both.
