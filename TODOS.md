@@ -6,8 +6,11 @@
 
 **What:** `backend/main.py`'s `analyze_question` endpoint and
 `backend/eval_harness.py`'s `run_new_mechanism` now both inline the same
-6-stage pipeline (extract_claims x2 -> align_claims -> classify_compatibility
-per pair -> build_ranked_diff_items -> synthesize_claim_diff_chairman).
+7-stage pipeline (extract_claims x2 -> align_claims -> classify_compatibility
+per pair -> structured compare + challenge round -> build_ranked_diff_items ->
+synthesize_claim_diff_chairman). The challenge step (compare_structured,
+select_challenge_items, run_challenge_round, apply_challenge_outcomes) is
+duplicated too.
 Extract a shared `async def run_claim_diff_pipeline(question, response_a,
 response_b) -> (agreed, conflicting, alignment, diff_items)` into
 `claim_diff.py` or `council.py` and call it from both.
@@ -26,6 +29,47 @@ it should not sit."
 **Effort:** S
 **Priority:** P2
 **Depends on:** None — can happen anytime.
+
+### Wire `record_context` into the challenge round (wiki query path)
+
+**What:** Pass the retrieved patient-record text as `record_context` to
+`run_challenge_round` (currently `None` in `main.py` and `eval_harness.py`).
+
+**Why:** The strict verbatim-evidence rule (`evidence_in_record`, the sticky
+`changed_without_evidence` guard) only activates when `record_context` is
+supplied, so today a model changing position is never checked against a record.
+
+**Context:** The hook exists and is tested; only the caller is missing. See
+`backend/challenge.py` and CLAUDE.md "Optional `record_context` hook".
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** Patient-wiki phase 4 (the wiki query path).
+
+### Challenge-round deferred follow-ups (from the 2026-11-07 review ledger)
+
+**What:** Minor items deferred during the challenge-round build; the ones that
+touch safety behavior:
+- `evidence_in_record` accepts any short substring, so a one-word quote defeats
+  the guard (needs a decision on minimum quote length / word boundary).
+- The error paths in `challenge.py` reset the sticky guard flag; safe only
+  because the hard cap is 2 rounds.
+- An unclosed `<structured>` fragment is left in the free text and would reach
+  claim extraction.
+- Fallback item selection takes unconfirmed claims from A then B, so A can
+  crowd out B (false-negative risk); conflicting pairs are categorized from
+  claim A only.
+- A `compare_structured` failure in `main.py` is silent (no log or error field).
+- The chairman's challenge section omits a per-entry urgency tag.
+- Result page: dark mode and urgent badge contrast unverified, chip label wraps
+  at 375px, "No structured disagreements found." can read as verified.
+
+**Why:** None are blockers, but several weaken a fail-safe if the cap or
+inputs change.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None.
 
 ### Build phase — full Postgres+pgvector data model and retrieval
 

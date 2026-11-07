@@ -4,7 +4,7 @@ This file contains technical details, architectural decisions, and important imp
 
 ## Project Overview
 
-Second Opinion is a claim-diff (disagreement-preserving) tool for two siblings cross-checking AI medical answers for an elderly family member. A question goes to two models (Claude + Gemini) directly, their answers are atomized into claims, the claims are aligned and classified as agreed/conflicting/unconfirmed, and a chairman model synthesizes a structured summary that never issues its own emergency verdict but always names one if a source model gave one.
+Second Opinion is a claim-diff (disagreement-preserving) tool for two siblings cross-checking AI medical answers for an elderly family member. A question goes to two models (Claude + Gemini) directly, their answers are atomized into claims, the claims are aligned and classified as agreed/conflicting/unconfirmed, a challenge round lets the two models respond to each other's position on the contested items, and a chairman model synthesizes a structured summary that never issues its own emergency verdict but always names one if a source model gave one. Each model also emits a machine-readable `<structured>` block (possible causes, interaction flags, medication changes, urgency) that is compared field-by-field and shown as a comparison table.
 
 This started as a fork of `karpathy/llm-council` (a 3-stage rank-and-synthesize chat). That original chat flow, its React frontend, and the local OmniRoute proxy it depended on have all been removed — the claim-diff mechanism is the only mechanism now, served behind a single stateless endpoint and a static result page.
 
@@ -31,13 +31,22 @@ This started as a fork of `karpathy/llm-council` (a 3-stage rank-and-synthesize 
 - `classify_compatibility()`: classifies an aligned pair as AGREED or CONFLICTING — fail-safe defaults to CONFLICTING, never AGREED
 - `categorize_claim()`/`rank_by_actionability()`: fixed keyword rubric (drug interaction > risk/red flag > diagnostic suggestion > monitoring > background), so ranking is cheap and deterministic rather than another LLM call per claim
 
+**`structured_diff.py`** - Structured comparison block
+- Pydantic `StructuredAssessment` (possible causes, interaction flags, medication changes, `Urgency`), `split_structured_block()` (strips the `<structured>` block from free text and parses it; an unclosed block is left in the text), and `compare_structured()`, which returns `StructuredDisagreement`s (top-cause mismatch, one-sided cause/interaction flag, medication-action mismatch, urgency disagreement). Pure code, no LLM call.
+
+**`challenge.py`** - Challenge round
+- `select_challenge_items()`: picks conflicting pairs, structured disagreements and (fallback) unconfirmed claims, ranked by category, capped at `CHALLENGE_MAX_ITEMS` (reports `cap_hit`)
+- `run_challenge_round()`: each model sees the other's position and answers MAINTAIN/CONCEDE/REVISE; the final positions are re-judged with `classify_compatibility`. One outcome per item, never raises. `apply_challenge_outcomes()` folds only RESOLVED, non-structured, non-`always_visible` outcomes into a newly-agreed list.
+- Constants in `config.py`: `CHALLENGE_MAX_ROUNDS` (1), `CHALLENGE_MAX_ROUNDS_HARD_CAP` (2), `CHALLENGE_MAX_ITEMS` (10), `CHALLENGE_FALLBACK_ITEMS` (3)
+
 **`council.py`** - Stage 1 + chairman synthesis
-- `stage1_collect_responses()`: parallel queries to both configured models. Returns one entry per *configured* model, always — a failed call stays visible downstream with an explicit `status: "failed"`, never silently dropped (see Degraded-run safety rule below)
+- `stage1_collect_responses()`: parallel queries to both configured models. Returns one entry per *configured* model, always — a failed call stays visible downstream with an explicit `status: "failed"`, never silently dropped (see Degraded-run safety rule below). Entries are now `{model, status, response, structured}`: the `<structured>` block is requested in the prompt (`request_structured_block()` is a follow-up repair call) and stripped from `response`, so claim extraction never sees it; `structured` is `None` if missing or unparseable
 - `build_ranked_diff_items()`: merges CONFLICTING pairs and UNCONFIRMED claims (both sides) into one ranked list — ranked together, not filtered per-state, so a low-category conflict can't outrank a high-category unconfirmed drug interaction
-- `synthesize_claim_diff_chairman()`: chairman synthesis, Pydantic-validated structured JSON (`ChairmanSummary`) with retry-then-fallback. `CHAIRMAN_NEVER_EMERGENCY_RULE` explicitly distinguishes the chairman's own voice (must never issue an emergency/not-emergency verdict) from reporting what a source model recommended (must always name it) — see Common Gotchas for why this distinction exists
+- `synthesize_claim_diff_chairman()`: chairman synthesis, Pydantic-validated structured JSON (`ChairmanSummary`) with retry-then-fallback. `CHAIRMAN_NEVER_EMERGENCY_RULE` explicitly distinguishes the chairman's own voice (must never issue an emergency/not-emergency verdict) from reporting what a source model recommended (must always name it) — see Common Gotchas for why this distinction exists. It also takes optional `challenge_outcomes`, rendered by `_format_challenge_section()` with `CHALLENGE_SECTION_NOTE`, so it can describe what the challenge round changed
 
 **`main.py`**
 - `POST /api/second-opinion/analyze`: stateless end-to-end run of the mechanism on one question. No conversation_id, no persistence, no CORS (the UI it serves is same-origin)
+- The analyze response gains `challenge` (`{ran, cap_hit, error, items[]}`), `structured` (`{available, a, b, disagreements}`) and `counts.resolved_after_challenge`. Between classify and rank, `analyze_question` runs the structured comparison and challenge round; on any failure `challenge.error` is set and the original comparison is shown untouched
 - `GET /ui`: serves `static/second-opinion-result.html`
 
 **`eval_harness.py` / `run_eval_cli.py`** - Offline regression eval
@@ -57,6 +66,22 @@ There is no React app. `static/second-opinion-result.html` is a single static pa
 ### Chairman never issues its own emergency verdict, but always reports a source model's
 A real live run surfaced this distinction the hard way: the chairman was dropping a genuine high-stakes disagreement (one model recommended immediate ER care, the other didn't) by over-applying the never-emergency-verdict rule to *reporting* what a source model said, not just to its own voice. `CHAIRMAN_NEVER_EMERGENCY_RULE` in `council.py` now says this explicitly. If you touch that prompt, re-run the eval case that caught it (`data/eval/synthetic_cases.json`, id `synthetic-er-red-flag-direct-conflict`) via the live-gated test in `tests/test_eval_er_case.py` — deliberately, on purpose, not as a side effect of an unrelated change.
 
+### Challenge round fail-safe rules
+- Never resolve on error or malformed output: a failed/unparseable challenge call is `UNRESOLVED_ERROR`, and the item stays in its original list.
+- `changed_without_evidence` is sticky across rounds: once any round sets it, the item can never become RESOLVED. It is only set when a `record_context` is supplied (see below); without one, RESOLVED items carry `resolved_without_record_evidence` so the UI shows they were not checked against a record.
+- Both models CONCEDE in the same round is a swap, not agreement: status `STILL_CONFLICTING` with the `mutual_concession` flag, positions unchanged.
+- `UNRESOLVED_ERROR` items are retried in round 2 (every non-RESOLVED item is re-challenged). Rounds default to 1; the hard cap is 2 regardless of the argument.
+- `CHALLENGE_MAX_ITEMS` caps how many items are challenged; the rest are deferred and `cap_hit` is surfaced visibly in the response/UI.
+
+### Urgency disagreements are always visible
+Urgency disagreements from the structured block are `always_visible`: they are challenged (so the outcome is shown) but never folded into the agreed list (`apply_challenge_outcomes` skips `source == "structured"` and `always_visible`). The chairman still reports a source model's emergency recommendation even if an item was resolved.
+
+### Challenge step commits state last
+In `main.analyze_question`, the challenge/structured step builds `new_agreed`, `new_conflicting`, etc. locally and reassigns `agreed`/`conflicting`/`unconfirmed_*` only as the LAST statements inside the `try`, so an exception anywhere earlier leaves the original comparison intact. Keep it that way when editing.
+
+### Optional `record_context` hook
+`run_challenge_round(..., record_context=None)` is a hook for the future patient-wiki query path. It is `None` everywhere today. The strict verbatim-evidence rule (`evidence_in_record`) only activates when it is supplied. Wiring is tracked in TODOS.md.
+
 ### Fail-safe defaults, every judge call
 Every LLM judge in this codebase (`classify_compatibility`, `check_claim_retained`, `check_never_emergency_verdict`) defaults to the *safer* outcome on an ambiguous or failed response: CONFLICTING rather than AGREED, not-retained rather than retained, not-compliant rather than compliant. Never assume a safety property is satisfied when unverified.
 
@@ -72,8 +97,9 @@ Models are hardcoded in `backend/config.py` as `provider/model-id` strings (`cla
 
 1. **Module Import Errors**: Always run backend as `python -m backend.main` from project root, not from backend directory.
 2. **Windows console + non-ASCII**: printing arrows/em-dashes to this machine's terminal can raise `UnicodeEncodeError` (cp1252 codec). `llm_client._log()` has a try/except ASCII-fallback guard — keep new debug-print code ASCII-only or route through `_log()`.
-3. **`eval_harness.run_new_mechanism` duplicates `main.analyze_question`'s 6-stage sequence** (extract x2 → align → classify → rank → synthesize) — the underlying functions are shared, but the orchestration itself is hand-written twice. Tracked in TODOS.md (P2, not urgent) as a fast-follow, not resolved yet.
+3. **`eval_harness.run_new_mechanism` duplicates `main.analyze_question`'s 7-stage sequence** (extract x2 → align → classify → challenge → rank → synthesize) — the underlying functions are shared, but the orchestration itself is hand-written twice. Tracked in TODOS.md (P2, not urgent) as a fast-follow, not resolved yet.
 4. **Live eval calls cost real money**: `tests/test_eval_er_case.py::test_eval_er_case_chairman_never_emits_emergency_verdict` and anything run via `run_eval_cli.py` hit real Claude/Gemini APIs whenever `ANTHROPIC_API_KEY`/`GOOGLE_API_KEY` are set in `.env` (they are, by default, in this repo). Everything else is mocked. When running the test suite, either accept that one test will make live calls, or run `pytest --deselect tests/test_eval_er_case.py::test_eval_er_case_chairman_never_emits_emergency_verdict` — clearing the env vars in your shell does **not** help, since `llm_client.py` calls `load_dotenv()` at import time and reads `.env` directly regardless of the parent shell's environment.
+5. **The live-gated ER test now runs the real challenge round**: `tests/test_eval_er_case.py` goes through `run_new_mechanism`, which includes the challenge step, so running it live makes more billed calls than before (extra structured-block and challenge calls).
 
 ## Testing Notes
 
@@ -85,6 +111,7 @@ Models are hardcoded in `backend/config.py` as `provider/model-id` strings (`cla
 User Question
     ↓
 Stage 1: query both models directly (Anthropic + Google) → [answer A, answer B]
+         each answer carries a <structured> block, stripped from the text and parsed
     ↓
 Extract claims from each answer (LLM extractor, retry-then-fallback)
     ↓
@@ -92,12 +119,15 @@ Align claims by aboutness (embedding similarity + LLM judge for borderline score
     ↓
 Classify each aligned pair: AGREED or CONFLICTING (fail-safe → CONFLICTING)
     ↓
+Compare structured blocks; challenge round on contested items (models respond to
+each other; RESOLVED only if re-judged AGREED, never on error; urgency stays visible)
+    ↓
 Rank CONFLICTING + UNCONFIRMED together by actionability (drug interaction highest)
     ↓
 Chairman synthesizes structured JSON: agreed findings, disagreement summary,
 observations, questions for the doctor — never its own emergency verdict
     ↓
-Return: {models, counts, summary}  →  rendered by static/second-opinion-result.html
+Return: {models, counts, summary, challenge, structured}  →  rendered by static/second-opinion-result.html
 ```
 
 The entire flow is async where possible to minimize latency.
