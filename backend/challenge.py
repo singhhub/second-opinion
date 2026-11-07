@@ -11,7 +11,7 @@ import asyncio
 import json
 import re
 from enum import Enum
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ValidationError
 
@@ -399,3 +399,66 @@ async def run_challenge_round(
         await asyncio.gather(*(guarded(s) for s in active), return_exceptions=True)
 
     return [s.outcome() for s in states]
+
+
+def _movable(outcome: ChallengeOutcome) -> bool:
+    item = outcome.item
+    return (
+        outcome.status == ChallengeStatus.RESOLVED
+        and item.source != "structured"
+        and not item.always_visible
+        and outcome.final_a is not None
+        and outcome.final_b is not None
+    )
+
+
+def apply_challenge_outcomes(
+    conflicting: List[ClaimPair],
+    unconfirmed_a: List[Claim],
+    unconfirmed_b: List[Claim],
+    outcomes: List[ChallengeOutcome],
+) -> Tuple[List[ClaimPair], List[ClaimPair], List[Claim], List[Claim]]:
+    """Fold RESOLVED outcomes into a newly-agreed list.
+
+    Returns (newly_agreed, conflicting, unconfirmed_a, unconfirmed_b). Only
+    RESOLVED, non-structured, non-always-visible outcomes with both final
+    positions move; everything else stays put. Items are matched back to the
+    input lists by identity. Lossless: each input item is in exactly one list.
+    """
+    moved_pairs: set = set()
+    moved_a: set = set()
+    moved_b: set = set()
+    newly_agreed: List[ClaimPair] = []
+
+    for outcome in outcomes:
+        if not _movable(outcome):
+            continue
+        item = outcome.item
+        if item.source == "conflicting" and item.pair is not None:
+            if id(item.pair) in moved_pairs or not any(item.pair is p for p in conflicting):
+                continue
+            moved_pairs.add(id(item.pair))
+            type_a = item.pair.claim_a.claim_type
+            type_b = item.pair.claim_b.claim_type
+        elif item.source == "unconfirmed" and item.claim is not None and item.side in ("A", "B"):
+            source_list = unconfirmed_a if item.side == "A" else unconfirmed_b
+            moved = moved_a if item.side == "A" else moved_b
+            if id(item.claim) in moved or not any(item.claim is c for c in source_list):
+                continue
+            moved.add(id(item.claim))
+            type_a = type_b = item.claim.claim_type
+        else:
+            continue
+        newly_agreed.append(
+            ClaimPair(
+                claim_a=Claim(text=outcome.final_a, claim_type=type_a),
+                claim_b=Claim(text=outcome.final_b, claim_type=type_b),
+            )
+        )
+
+    return (
+        newly_agreed,
+        [p for p in conflicting if id(p) not in moved_pairs],
+        [c for c in unconfirmed_a if id(c) not in moved_a],
+        [c for c in unconfirmed_b if id(c) not in moved_b],
+    )

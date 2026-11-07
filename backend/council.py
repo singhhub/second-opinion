@@ -13,6 +13,7 @@ from .structured_diff import (
     split_structured_block,
 )
 from .claim_diff import Claim, ClaimPair, ClaimState, categorize_claim
+from .challenge import ChallengeOutcome
 
 
 class ObservationGroup(BaseModel):
@@ -224,6 +225,30 @@ Respond with ONLY a JSON object matching this exact shape - no markdown fences, 
 If there is no disagreement, set "disagreement_summary" to an empty string and "observations" to an empty list - never omit them or leave them implicit."""
 
 
+CHALLENGE_SECTION_NOTE = """
+
+The user message also contains a CHALLENGE ROUND RESULTS section. It lists disagreements the two models were asked to reconsider after seeing each other's position. For each entry you are given the status, any flags, the two original positions, and the final positions.
+- For a RESOLVED item, say the disagreement was settled after the models were challenged, and name both original positions so the caregivers can see what changed.
+- Flag meanings: "changed_without_evidence" means a model changed its position without quoting supporting text from the patient record; "mutual_concession" means each model adopted the other's position (a swap, not real agreement); "resolved_without_record_evidence" means no patient record was available, so the settlement could not be checked against any record. State these plainly when they apply.
+- Never present any outcome as verified, confirmed, or clinician-checked. A settled item is still only what the models said after being challenged.
+- Never soften or omit a source model's own emergency or urgent recommendation, even if that item is RESOLVED. Urgency disagreements are always reported."""
+
+
+def _format_challenge_section(outcomes: List[ChallengeOutcome]) -> str:
+    def pos(text: Optional[str]) -> str:
+        return "(none)" if text is None else f'"{text}"'
+
+    lines = []
+    for o in outcomes:
+        flags = ", ".join(o.flags) if o.flags else "none"
+        lines.append(
+            f"- Status: {o.status.value}; flags: {flags}\n"
+            f"  Original: Model A {pos(o.item.text_a)}; Model B {pos(o.item.text_b)}\n"
+            f"  Final: Model A {pos(o.final_a)}; Model B {pos(o.final_b)}"
+        )
+    return "\n".join(lines)
+
+
 def _parse_chairman_summary(raw: Optional[Dict[str, Any]]) -> Optional[ChairmanSummary]:
     if raw is None or not raw.get("content"):
         return None
@@ -252,6 +277,7 @@ async def synthesize_claim_diff_chairman(
     agreed: List[ClaimPair],
     ranked_diff_items: List[Dict[str, Any]],
     chairman_model: str = CHAIRMAN_MODEL,
+    challenge_outcomes: Optional[List[ChallengeOutcome]] = None,
 ) -> Dict[str, Any]:
     """
     Chairman synthesis for the claim-diff mechanism.
@@ -275,8 +301,16 @@ AGREED FINDINGS (both models agree):
 CONFLICTING / UNCONFIRMED CLAIMS (ranked by actionability, most important first):
 {diff_text}"""
 
+    system_prompt = CHAIRMAN_SYSTEM_PROMPT
+    if challenge_outcomes:
+        user_message += (
+            "\n\nCHALLENGE ROUND RESULTS (disagreements the two models were "
+            "asked to reconsider):\n" + _format_challenge_section(challenge_outcomes)
+        )
+        system_prompt = CHAIRMAN_SYSTEM_PROMPT + CHALLENGE_SECTION_NOTE
+
     messages = [
-        {"role": "system", "content": CHAIRMAN_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
     ]
 

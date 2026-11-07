@@ -392,3 +392,92 @@ def test_prompt_includes_record_and_does_not_name_provider():
         blob = json.dumps(call.args[1])
         assert "RECORD-XYZ" in blob and "Q?" in blob
         assert "mA" not in blob and "mB" not in blob
+
+
+# ---------------------------------------------------------------------------
+# apply_challenge_outcomes
+# ---------------------------------------------------------------------------
+
+from backend.challenge import ChallengeItem, ChallengeOutcome, apply_challenge_outcomes  # noqa: E402
+
+
+def _conflict_outcome(pair, status, final_a="fa", final_b="fb"):
+    item = ChallengeItem(
+        item_id="c0", source="conflicting",
+        category=ActionabilityCategory.DIAGNOSTIC_SUGGESTION,
+        text_a=pair.claim_a.text, text_b=pair.claim_b.text, pair=pair,
+    )
+    return ChallengeOutcome(item=item, final_a=final_a, final_b=final_b, status=status)
+
+
+def _unconfirmed_outcome(claim, side, status, final_a=None, final_b=None):
+    item = ChallengeItem(
+        item_id="u0", source="unconfirmed",
+        category=ActionabilityCategory.DIAGNOSTIC_SUGGESTION,
+        text_a=claim.text if side == "A" else None,
+        text_b=claim.text if side == "B" else None,
+        claim=claim, side=side,
+    )
+    return ChallengeOutcome(item=item, final_a=final_a, final_b=final_b, status=status)
+
+
+def test_resolved_conflict_moves_to_agreed_with_final_texts():
+    p1, p2 = _pair("a1", "b1"), _pair("a2", "b2")
+    out = _conflict_outcome(p2, ChallengeStatus.RESOLVED, "same a", "same b")
+    agreed, conflicting, ua, ub = apply_challenge_outcomes([p1, p2], [], [], [out])
+    assert conflicting == [p1]
+    assert len(agreed) == 1
+    assert agreed[0].claim_a.text == "same a"
+    assert agreed[0].claim_b.text == "same b"
+    assert agreed[0].claim_a.claim_type == ClaimType.ASSERTION
+    assert ua == [] and ub == []
+
+
+def test_still_conflicting_item_stays_in_conflicting():
+    p1 = _pair("a1", "b1")
+    out = _conflict_outcome(p1, ChallengeStatus.STILL_CONFLICTING)
+    agreed, conflicting, _, _ = apply_challenge_outcomes([p1], [], [], [out])
+    assert agreed == [] and conflicting == [p1]
+
+
+def test_resolved_urgency_structured_item_does_not_move():
+    p1 = _pair("a1", "b1")
+    item = ChallengeItem(
+        item_id="s0", source="structured",
+        category=ActionabilityCategory.RISK_OR_RED_FLAG,
+        text_a="da", text_b="db", always_visible=True,
+    )
+    out = ChallengeOutcome(item=item, final_a="x", final_b="x", status=ChallengeStatus.RESOLVED)
+    agreed, conflicting, ua, ub = apply_challenge_outcomes([p1], [], [], [out])
+    assert agreed == [] and conflicting == [p1] and ua == [] and ub == []
+
+
+def test_unconfirmed_resolved_leaves_unconfirmed_list_and_joins_agreed():
+    c1, c2 = _claim("same text"), _claim("same text")
+    out = _unconfirmed_outcome(c2, "A", ChallengeStatus.RESOLVED, "fa", "fb")
+    agreed, conflicting, ua, ub = apply_challenge_outcomes([], [c1, c2], [], [out])
+    assert len(ua) == 1 and ua[0] is c1  # identity, not text equality
+    assert [p.claim_a.text for p in agreed] == ["fa"]
+    assert [p.claim_b.text for p in agreed] == ["fb"]
+    assert conflicting == [] and ub == []
+
+
+def test_resolved_with_none_final_does_not_move():
+    c1 = _claim("x")
+    out = _unconfirmed_outcome(c1, "A", ChallengeStatus.RESOLVED, "fa", None)
+    agreed, _, ua, _ = apply_challenge_outcomes([], [c1], [], [out])
+    assert agreed == [] and ua == [c1]
+
+
+def test_apply_is_lossless():
+    p1, p2, p3 = _pair("a1", "b1"), _pair("a2", "b2"), _pair("a3", "b3")
+    ca, cb = _claim("ua"), _claim("ub")
+    outs = [
+        _conflict_outcome(p2, ChallengeStatus.RESOLVED, "x", "y"),
+        _conflict_outcome(p3, ChallengeStatus.UNRESOLVED_ERROR),
+        _unconfirmed_outcome(cb, "B", ChallengeStatus.RESOLVED, "x", "y"),
+    ]
+    agreed, conflicting, ua, ub = apply_challenge_outcomes([p1, p2, p3], [ca], [cb], outs)
+    assert len(agreed) + len(conflicting) + len(ua) + len(ub) == 5
+    assert conflicting == [p1, p3] and ua == [ca] and ub == []
+    assert len(agreed) == 2

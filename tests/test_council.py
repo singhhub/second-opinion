@@ -351,3 +351,54 @@ def test_chairman_summary_models_default_empty_lists():
 
     assert summary.observations == []
     assert summary.questions_for_doctor == []
+
+
+def _challenge_outcome(status, flags=None):
+    from backend.challenge import ChallengeItem, ChallengeOutcome
+    from backend.claim_diff import ActionabilityCategory
+    item = ChallengeItem(
+        item_id="c0", source="conflicting",
+        category=ActionabilityCategory.DIAGNOSTIC_SUGGESTION,
+        text_a="ORIGINAL POSITION ALPHA", text_b="ORIGINAL POSITION BETA",
+    )
+    return ChallengeOutcome(
+        item=item, final_a="FINAL ALPHA", final_b="FINAL BETA",
+        status=status, flags=flags or [],
+    )
+
+
+_EMPTY_SUMMARY = json.dumps({
+    "agreed_findings": "", "disagreement_summary": "", "observations": [], "questions_for_doctor": [],
+})
+
+
+async def test_chairman_message_includes_challenge_section_when_outcomes_given():
+    from backend.challenge import ChallengeStatus
+    outcome = _challenge_outcome(ChallengeStatus.RESOLVED, ["mutual_concession"])
+    with patch.object(
+        council, "query_model", new=AsyncMock(return_value=_fake_response(_EMPTY_SUMMARY))
+    ) as mock_query:
+        await council.synthesize_claim_diff_chairman(
+            "q", [], [], challenge_outcomes=[outcome]
+        )
+    system_prompt = mock_query.call_args.args[1][0]["content"]
+    user_message = mock_query.call_args.args[1][1]["content"]
+    assert "CHALLENGE ROUND RESULTS" in user_message
+    for text in ("ORIGINAL POSITION ALPHA", "ORIGINAL POSITION BETA", "FINAL ALPHA", "FINAL BETA"):
+        assert text in user_message
+    assert "resolved" in user_message and "mutual_concession" in user_message
+    assert council.CHAIRMAN_NEVER_EMERGENCY_RULE in system_prompt
+    assert council.CHALLENGE_SECTION_NOTE in system_prompt
+
+
+async def test_chairman_message_unchanged_when_no_outcomes():
+    captured = []
+    for kwargs in ({}, {"challenge_outcomes": None}, {"challenge_outcomes": []}):
+        with patch.object(
+            council, "query_model", new=AsyncMock(return_value=_fake_response(_EMPTY_SUMMARY))
+        ) as mock_query:
+            await council.synthesize_claim_diff_chairman("q", [], [], **kwargs)
+        captured.append(mock_query.call_args.args[1])
+    assert captured[0] == captured[1] == captured[2]
+    assert captured[0][0]["content"] == council.CHAIRMAN_SYSTEM_PROMPT
+    assert "CHALLENGE" not in captured[0][1]["content"]
