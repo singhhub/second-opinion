@@ -235,6 +235,30 @@ def test_analyze_challenge_exception_keeps_all_items_and_sets_error(_no_network_
     assert body["challenge"]["error"]
 
 
+def test_analyze_failure_while_building_challenge_block_keeps_conflict_in_diff(
+    _no_network_challenge,
+):
+    """If building the response items raises after apply, no list may have moved."""
+    pair = _pair()
+    real = _outcome(pair, ChallengeStatus.RESOLVED)
+
+    class _Flaky:
+        def __getattr__(self, name):
+            if name == "flags":
+                raise RuntimeError("serialization boom")
+            return getattr(real, name)
+
+    _no_network_challenge.return_value = [_Flaky()]
+    body, _ = _run([pair], [], [])
+
+    assert body["degraded"] is False
+    assert body["counts"]["conflicting"] == 1
+    assert body["counts"]["agreed"] == 0
+    assert body["counts"]["resolved_after_challenge"] == 0
+    assert body["challenge"]["error"]
+    assert body["challenge"]["ran"] is False
+
+
 def test_analyze_no_conflicts_makes_no_challenge_call(_no_network_challenge):
     body, chairman = _run([], [], [])
 

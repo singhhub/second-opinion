@@ -113,10 +113,7 @@ async def analyze_question(request: AnalyzeRequest):
                 new_agreed, new_conflicting, new_ua, new_ub = apply_challenge_outcomes(
                     conflicting, unconfirmed_a, unconfirmed_b, outcomes
                 )
-                agreed = agreed + new_agreed
-                conflicting, unconfirmed_a, unconfirmed_b = new_conflicting, new_ua, new_ub
-                newly_agreed = new_agreed
-                challenge = {
+                new_challenge = {
                     "ran": True,
                     "cap_hit": selection.cap_hit,
                     "error": None,
@@ -136,6 +133,11 @@ async def analyze_question(request: AnalyzeRequest):
                         for o in outcomes
                     ],
                 }
+                # Commit state last: nothing above may raise after this point.
+                agreed = agreed + new_agreed
+                conflicting, unconfirmed_a, unconfirmed_b = new_conflicting, new_ua, new_ub
+                newly_agreed = new_agreed
+                challenge = new_challenge
             else:
                 challenge["cap_hit"] = selection.cap_hit
         except Exception:
