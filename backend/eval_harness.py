@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from . import council, llm_client
+from .challenge import apply_challenge_outcomes, run_challenge_round, select_challenge_items
 from .claim_diff import ClaimState, align_claims, classify_compatibility, extract_claims
+from .config import COUNCIL_MODELS
 
 RETENTION_JUDGE_MODEL = "claude/claude-sonnet-4-5-20250929"
 
@@ -79,15 +81,15 @@ async def check_never_emergency_verdict(
 
 async def run_new_mechanism(case: Dict[str, Any]) -> Dict[str, Any]:
     """Run one eval case through the claim-diff mechanism end to end."""
-    llm_client._log("STAGE 1/6 extract_claims (model A)", case_id=case.get("id"))
+    llm_client._log("STAGE 1/7 extract_claims (model A)", case_id=case.get("id"))
     claims_a = await extract_claims(case["model_a_response"])
     llm_client._log("  -> claims A", claims=[c.text[:60] for c in claims_a])
 
-    llm_client._log("STAGE 2/6 extract_claims (model B)", case_id=case.get("id"))
+    llm_client._log("STAGE 2/7 extract_claims (model B)", case_id=case.get("id"))
     claims_b = await extract_claims(case["model_b_response"])
     llm_client._log("  -> claims B", claims=[c.text[:60] for c in claims_b])
 
-    llm_client._log("STAGE 3/6 align_claims")
+    llm_client._log("STAGE 3/7 align_claims")
     alignment = await align_claims(claims_a, claims_b)
     llm_client._log(
         "  -> alignment",
@@ -96,7 +98,7 @@ async def run_new_mechanism(case: Dict[str, Any]) -> Dict[str, Any]:
         unaligned_b=len(alignment.unaligned_b),
     )
 
-    llm_client._log("STAGE 4/6 classify_compatibility")
+    llm_client._log("STAGE 4/7 classify_compatibility")
     agreed = []
     conflicting = []
     for pair in alignment.aligned:
@@ -107,17 +109,45 @@ async def run_new_mechanism(case: Dict[str, Any]) -> Dict[str, Any]:
         else:
             conflicting.append(pair)
 
-    llm_client._log("STAGE 5/6 build_ranked_diff_items (no LLM call)")
+    llm_client._log("STAGE 5/7 challenge round")
+    unconfirmed_a = alignment.unaligned_a
+    unconfirmed_b = alignment.unaligned_b
+    outcomes = None
+    # Mirrors main.analyze_question: any failure leaves every list untouched.
+    try:
+        selection = select_challenge_items(conflicting, unconfirmed_a, unconfirmed_b, [])
+        llm_client._log("  -> challenge selected", count=len(selection.selected))
+        if selection.selected:
+            new_outcomes = await run_challenge_round(
+                selection.selected,
+                case["question"],
+                COUNCIL_MODELS[0],
+                COUNCIL_MODELS[1],
+                record_context=None,
+            )
+            newly_agreed, new_conflicting, new_ua, new_ub = apply_challenge_outcomes(
+                conflicting, unconfirmed_a, unconfirmed_b, new_outcomes
+            )
+            llm_client._log("  -> challenge resolved", count=len(newly_agreed))
+            # Commit state last: nothing above may raise after this point.
+            agreed = agreed + newly_agreed
+            conflicting, unconfirmed_a, unconfirmed_b = new_conflicting, new_ua, new_ub
+            outcomes = new_outcomes
+    except Exception as e:
+        outcomes = None
+        llm_client._log("  -> challenge round failed; lists untouched", error=repr(e))
+
+    llm_client._log("STAGE 6/7 build_ranked_diff_items (no LLM call)")
     diff_items = council.build_ranked_diff_items(
         conflicting=conflicting,
-        unconfirmed_a=alignment.unaligned_a,
-        unconfirmed_b=alignment.unaligned_b,
+        unconfirmed_a=unconfirmed_a,
+        unconfirmed_b=unconfirmed_b,
     )
     llm_client._log("  -> ranked diff items", count=len(diff_items))
 
-    llm_client._log("STAGE 6/6 synthesize_claim_diff_chairman")
+    llm_client._log("STAGE 7/7 synthesize_claim_diff_chairman")
     chairman_result = await council.synthesize_claim_diff_chairman(
-        case["question"], agreed, diff_items
+        case["question"], agreed, diff_items, challenge_outcomes=outcomes or None
     )
     llm_client._log("  -> chairman output", preview=chairman_result["response"][:300])
 
