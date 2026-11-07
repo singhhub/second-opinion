@@ -129,6 +129,29 @@
   .footnote{font-size:.78rem; color:var(--muted); line-height:1.5; background:var(--surface-2); border-radius:12px; padding:12px 14px;}
   .footnote b{color:var(--ink);}
 
+  .chip{min-width:0; text-align:center;}
+  .chip.resolved .num{color:var(--accent);}
+
+  .note{font-size:.82rem; line-height:1.5; border-radius:10px; padding:10px 12px; background:var(--surface-2); color:var(--muted); margin-bottom:10px; overflow-wrap:anywhere;}
+  .note.err{background:var(--danger-soft); color:var(--danger);}
+  .ch-item{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--c); border-radius:12px; padding:12px 14px; margin-bottom:10px; overflow-wrap:anywhere;}
+  .ch-item.resolved{--c:var(--agreed);}
+  .ch-item.still{--c:var(--conflicting); background:var(--conflicting-soft);}
+  .ch-item.error{--c:var(--danger); background:var(--danger-soft);}
+  .ch-head{display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:8px;}
+  .ch-cat{font-size:.8rem; font-weight:700; color:var(--ink);}
+  .badge{font-size:.66rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase; padding:3px 8px; border-radius:999px; color:var(--c); border:1px solid var(--c);}
+  .badge.urgent{background:var(--danger); border-color:var(--danger); color:var(--paper);}
+  .ch-sub{font-size:.7rem; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); margin:8px 0 4px;}
+  .ch-row{font-size:.86rem; line-height:1.45; margin:0 0 4px;}
+  .ch-row b{color:var(--muted); font-weight:600;}
+  .ch-flag{font-size:.8rem; font-style:italic; color:var(--conflicting); margin:6px 0 0;}
+  .ch-disclaimer{font-size:.76rem; color:var(--faint); font-style:italic; margin-top:2px;}
+  .struct-table{width:100%; border-collapse:collapse; table-layout:fixed; font-size:.82rem; line-height:1.4;}
+  .struct-table th{text-align:left; font-size:.68rem; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); padding:6px 6px; border-bottom:1px solid var(--line-strong);}
+  .struct-table td{vertical-align:top; padding:8px 6px; border-bottom:1px solid var(--line); overflow-wrap:anywhere; word-break:break-word;}
+  .struct-table .kind{font-weight:700; width:24%;}
+
   [hidden]{display:none !important;}
 </style>
 </head>
@@ -165,6 +188,7 @@
         <div class="chip agreed"><span class="num" id="chip-agreed-num">0</span><span class="lbl">Agreed</span></div>
         <div class="chip conflicting"><span class="num" id="chip-conflicting-num">0</span><span class="lbl">Conflicting</span></div>
         <div class="chip unconfirmed"><span class="num" id="chip-unconfirmed-num">0</span><span class="lbl">Unconfirmed</span></div>
+        <div class="chip resolved"><span class="num" id="chip-resolved-num">0</span><span class="lbl">Resolved after challenge</span></div>
       </div>
 
       <div>
@@ -193,6 +217,18 @@
             <ul class="qlist" id="questions-list"></ul>
           </div>
         </div>
+      </div>
+
+      <div id="challenge-card" hidden>
+        <div class="section-title" style="margin-bottom:10px;">Challenge round <span class="hint">- models re-checked their disagreements</span></div>
+        <div id="challenge-notes"></div>
+        <div id="challenge-items"></div>
+        <div class="ch-disclaimer">AI-generated comparison - not clinician-verified</div>
+      </div>
+
+      <div id="structured-card" hidden>
+        <div class="section-title" style="margin-bottom:10px;">Structured comparison</div>
+        <div id="structured-body"></div>
       </div>
 
       <div class="footnote">
@@ -231,6 +267,7 @@
     document.getElementById('chip-agreed-num').textContent = data.counts.agreed;
     document.getElementById('chip-conflicting-num').textContent = data.counts.conflicting;
     document.getElementById('chip-unconfirmed-num').textContent = data.counts.unconfirmed;
+    document.getElementById('chip-resolved-num').textContent = data.counts.resolved_after_challenge || 0;
 
     var tabsEl = document.getElementById('model-tabs');
     var panelsEl = document.getElementById('model-panels');
@@ -304,7 +341,120 @@
       qlist.appendChild(li);
     });
 
+    renderChallenge(data.challenge);
+    renderStructured(data.structured);
+
     selectModelTab(0);
+  }
+
+  var FLAG_TEXT = {
+    changed_without_evidence: 'changed position without record evidence',
+    resolved_without_record_evidence: 'agreed after challenge, no patient record to check against',
+    mutual_concession: "both models adopted each other's view - not treated as agreement"
+  };
+  var STATUS_TEXT = {
+    RESOLVED: 'Settled after challenge',
+    STILL_CONFLICTING: 'Still conflicting',
+    UNRESOLVED_ERROR: 'Could not be challenged (error)'
+  };
+
+  function el(tag, className, text) {
+    var e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+
+  function posText(v) {
+    return (v === null || v === undefined || v === '') ? '(no position)' : String(v);
+  }
+
+  function labeledRow(parent, label, value) {
+    var p = el('p', 'ch-row');
+    p.appendChild(el('b', null, label + ': '));
+    p.appendChild(document.createTextNode(posText(value)));
+    parent.appendChild(p);
+  }
+
+  function renderChallenge(ch) {
+    var card = document.getElementById('challenge-card');
+    var notes = document.getElementById('challenge-notes');
+    var list = document.getElementById('challenge-items');
+    notes.textContent = '';
+    list.textContent = '';
+    var items = (ch && Array.isArray(ch.items)) ? ch.items : [];
+    var hasNote = !!(ch && (ch.cap_hit || ch.error));
+    if (!ch || (items.length === 0 && !hasNote)) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    if (ch.error) notes.appendChild(el('div', 'note err', String(ch.error)));
+    if (ch.cap_hit) notes.appendChild(el('div', 'note', 'Some disagreements were not challenged - cost cap reached.'));
+
+    items.forEach(function (item) {
+      var status = item.status;
+      var cls = status === 'RESOLVED' ? 'resolved' : (status === 'UNRESOLVED_ERROR' ? 'error' : 'still');
+      var box = el('div', 'ch-item ' + cls);
+
+      var head = el('div', 'ch-head');
+      head.appendChild(el('span', 'ch-cat', posText(item.category)));
+      if (item.always_visible) head.appendChild(el('span', 'badge urgent', 'Urgency - always shown'));
+      head.appendChild(el('span', 'badge', STATUS_TEXT[status] || String(status)));
+      box.appendChild(head);
+
+      if (status === 'RESOLVED') {
+        box.appendChild(el('div', 'ch-sub', 'Original disagreement (settled after challenge)'));
+      } else {
+        box.appendChild(el('div', 'ch-sub', 'Original positions'));
+      }
+      labeledRow(box, 'Model A', item.original_a);
+      labeledRow(box, 'Model B', item.original_b);
+      box.appendChild(el('div', 'ch-sub', 'After challenge'));
+      labeledRow(box, 'Model A', item.final_a);
+      labeledRow(box, 'Model B', item.final_b);
+
+      (Array.isArray(item.flags) ? item.flags : []).forEach(function (flag) {
+        box.appendChild(el('p', 'ch-flag', FLAG_TEXT[flag] || String(flag)));
+      });
+      list.appendChild(box);
+    });
+  }
+
+  function renderStructured(st) {
+    var card = document.getElementById('structured-card');
+    var body = document.getElementById('structured-body');
+    body.textContent = '';
+    if (!st) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    if (!st.available) {
+      body.appendChild(el('div', 'note', 'Structured comparison unavailable - only the written answers were compared.'));
+      return;
+    }
+    var rows = Array.isArray(st.disagreements) ? st.disagreements : [];
+    if (rows.length === 0) {
+      body.appendChild(el('div', 'note', 'No structured disagreements found.'));
+      return;
+    }
+    var table = el('table', 'struct-table');
+    var thead = el('thead');
+    var hr = el('tr');
+    ['Kind', 'Model A', 'Model B'].forEach(function (h) { hr.appendChild(el('th', null, h)); });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    var tbody = el('tbody');
+    rows.forEach(function (d) {
+      var tr = el('tr');
+      tr.appendChild(el('td', 'kind', posText(d.kind)));
+      tr.appendChild(el('td', null, posText(d.detail_a)));
+      tr.appendChild(el('td', null, posText(d.detail_b)));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    body.appendChild(table);
   }
 
   async function runAnalysis(event) {
