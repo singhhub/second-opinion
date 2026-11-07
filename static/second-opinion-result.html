@@ -190,6 +190,7 @@
         <div class="chip unconfirmed"><span class="num" id="chip-unconfirmed-num">0</span><span class="lbl">Unconfirmed</span></div>
         <div class="chip resolved"><span class="num" id="chip-resolved-num">0</span><span class="lbl">Resolved after challenge</span></div>
       </div>
+      <div class="note" id="structured-count-note" style="margin-top:-10px; margin-bottom:0;" hidden></div>
 
       <div>
         <div class="section-title" style="margin-bottom:10px;">What each model said <span class="hint">- tap to switch</span></div>
@@ -303,8 +304,33 @@
     document.getElementById('agreed-text').textContent =
       data.summary.agreed_findings || 'No agreed findings - the two models did not converge on any shared claim.';
 
+    var structuredRows = (data.structured && Array.isArray(data.structured.disagreements))
+      ? data.structured.disagreements : [];
+    var structuredCount = Math.max(structuredRows.length, Number(data.counts.structured_disagreements) || 0);
+    var hasUrgencyRow = structuredRows.some(function (d) { return d && d.kind === 'urgency'; });
+    var countNote = document.getElementById('structured-count-note');
+    if (structuredCount > 0) {
+      countNote.textContent = 'Structured comparison: ' + structuredCount + ' disagreement' +
+        (structuredCount === 1 ? '' : 's') + (hasUrgencyRow ? ', including urgency' : '') + ' - see below.';
+      countNote.hidden = false;
+    } else {
+      countNote.textContent = '';
+      countNote.hidden = true;
+    }
+
+    var claimDiffCount = (Number(data.counts.conflicting) || 0) + (Number(data.counts.unconfirmed) || 0);
+    var fallbackText;
+    if (structuredCount > 0) {
+      fallbackText = 'No written summary of the disagreement, but the structured comparison found ' +
+        structuredCount + ' disagreement' + (structuredCount === 1 ? '' : 's') +
+        ' between the models - see "Structured comparison" below.';
+    } else if (claimDiffCount > 0) {
+      fallbackText = 'No written summary of the disagreement - see the counts above and the details below.';
+    } else {
+      fallbackText = 'No conflicting or unconfirmed claims - the two models fully agreed.';
+    }
     document.getElementById('disagreement-text').textContent =
-      data.summary.disagreement_summary || 'No conflicting or unconfirmed claims - the two models fully agreed.';
+      data.summary.disagreement_summary || fallbackText;
 
     var observeBox = document.getElementById('observe-box');
     var observeList = document.getElementById('observe-list');
@@ -393,14 +419,15 @@
     if (ch.cap_hit) notes.appendChild(el('div', 'note', 'Some disagreements were not challenged - cost cap reached.'));
 
     items.forEach(function (item) {
-      var status = item.status;
+      // The API sends lowercase enum values ("resolved"); compare case-insensitively.
+      var status = String(item.status === null || item.status === undefined ? '' : item.status).toUpperCase();
       var cls = status === 'RESOLVED' ? 'resolved' : (status === 'UNRESOLVED_ERROR' ? 'error' : 'still');
       var box = el('div', 'ch-item ' + cls);
 
       var head = el('div', 'ch-head');
       head.appendChild(el('span', 'ch-cat', posText(item.category)));
       if (item.always_visible) head.appendChild(el('span', 'badge urgent', 'Urgency - always shown'));
-      head.appendChild(el('span', 'badge', STATUS_TEXT[status] || String(status)));
+      head.appendChild(el('span', 'badge', STATUS_TEXT[status] || (status ? status.replace(/_/g, ' ').toLowerCase() : 'Unknown status')));
       box.appendChild(head);
 
       if (status === 'RESOLVED') {
