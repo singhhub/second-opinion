@@ -144,3 +144,200 @@ def split_structured_block(
         return free, block
     except Exception:
         return response_text, None
+
+
+class StructuredDisagreementKind(str, Enum):
+    TOP_CAUSE = "top_cause"
+    ONE_SIDED_CAUSE = "one_sided_cause"
+    INTERACTION_FLAG = "interaction_flag"
+    MEDICATION_CHANGE = "medication_change"
+    URGENCY = "urgency"
+
+
+class StructuredDisagreement(BaseModel):
+    kind: StructuredDisagreementKind
+    summary: str
+    detail_a: str
+    detail_b: str
+    sort_key: int
+
+
+# Lower sort_key is shown first. Bands leave room for in-band ordering.
+_SORT_URGENCY = 0
+_SORT_FLAG = 100  # + 0 (high) .. 2 (low)
+_SORT_MED = 200
+_SORT_TOP_CAUSE = 300
+_SORT_ONE_SIDED = 310
+
+_SEVERITY_ORDER = [Severity.HIGH, Severity.MODERATE, Severity.LOW]
+
+
+def _top_cause(a: StructuredAssessment) -> Optional[PossibleCause]:
+    if not a.possible_causes:
+        return None
+    return min(a.possible_causes, key=lambda c: c.rank)
+
+
+def _flag_map(a: StructuredAssessment) -> dict:
+    out = {}
+    for f in a.interaction_flags:
+        key = frozenset(d.strip().lower() for d in f.drugs)
+        prev = out.get(key)
+        if prev is None or _SEVERITY_ORDER.index(f.severity) < _SEVERITY_ORDER.index(
+            prev.severity
+        ):
+            out[key] = f
+    return out
+
+
+def _med_map(a: StructuredAssessment) -> dict:
+    out = {}
+    for m in a.medication_changes:
+        out.setdefault(m.drug.strip().lower(), m)
+    return out
+
+
+def _flag_label(f: InteractionFlag) -> str:
+    return " + ".join(sorted(d.strip() for d in f.drugs))
+
+
+def compare_structured(
+    a: Optional[StructuredAssessment], b: Optional[StructuredAssessment]
+) -> List[StructuredDisagreement]:
+    """Compare two structured blocks; pure code, sorted by sort_key ascending.
+
+    Returns [] if either side is None. Confidence is never compared.
+    """
+    if a is None or b is None:
+        return []
+    out: List[StructuredDisagreement] = []
+
+    # Urgency
+    if a.urgency.level != b.urgency.level:
+        out.append(
+            StructuredDisagreement(
+                kind=StructuredDisagreementKind.URGENCY,
+                summary=(
+                    f"Urgency differs: {a.urgency.level.value} vs "
+                    f"{b.urgency.level.value}"
+                ),
+                detail_a=f"Urgency: {a.urgency.level.value}",
+                detail_b=f"Urgency: {b.urgency.level.value}",
+                sort_key=_SORT_URGENCY,
+            )
+        )
+
+    # Interaction flags
+    fa, fb = _flag_map(a), _flag_map(b)
+    for key in sorted(set(fa) | set(fb), key=lambda k: sorted(k)):
+        x, y = fa.get(key), fb.get(key)
+        if x is not None and y is not None:
+            if x.severity == y.severity:
+                continue
+            hi, lo = sorted(
+                (x.severity, y.severity), key=lambda s: _SEVERITY_ORDER.index(s)
+            )
+            summary = (
+                f"Interaction {_flag_label(x)}: severity {hi.value} vs {lo.value}"
+            )
+            detail_a = f"Severity {x.severity.value}: {x.concern}"
+            detail_b = f"Severity {y.severity.value}: {y.concern}"
+            sev = hi
+        else:
+            present = x if x is not None else y
+            who = "A" if x is not None else "B"
+            summary = (
+                f"Interaction {_flag_label(present)} ({present.severity.value}) "
+                f"flagged only by {who}"
+            )
+            detail_a = (
+                f"Severity {x.severity.value}: {x.concern}"
+                if x is not None
+                else "Not flagged"
+            )
+            detail_b = (
+                f"Severity {y.severity.value}: {y.concern}"
+                if y is not None
+                else "Not flagged"
+            )
+            sev = present.severity
+        out.append(
+            StructuredDisagreement(
+                kind=StructuredDisagreementKind.INTERACTION_FLAG,
+                summary=summary,
+                detail_a=detail_a,
+                detail_b=detail_b,
+                sort_key=_SORT_FLAG + _SEVERITY_ORDER.index(sev),
+            )
+        )
+
+    # Medication changes
+    ma, mb = _med_map(a), _med_map(b)
+    for drug in sorted(set(ma) | set(mb)):
+        x, y = ma.get(drug), mb.get(drug)
+        if x is not None and y is not None:
+            if x.action == y.action:
+                continue
+            summary = (
+                f"Medication {x.drug}: {x.action.value} vs {y.action.value}"
+            )
+        else:
+            present = x if x is not None else y
+            if present.action in (MedAction.CONTINUE, MedAction.MONITOR):
+                continue
+            who = "A" if x is not None else "B"
+            summary = (
+                f"Medication {present.drug}: {present.action.value} "
+                f"proposed only by {who}"
+            )
+        out.append(
+            StructuredDisagreement(
+                kind=StructuredDisagreementKind.MEDICATION_CHANGE,
+                summary=summary,
+                detail_a=(
+                    f"{x.action.value}: {x.reason}" if x is not None else "Not addressed"
+                ),
+                detail_b=(
+                    f"{y.action.value}: {y.reason}" if y is not None else "Not addressed"
+                ),
+                sort_key=_SORT_MED,
+            )
+        )
+
+    # Causes
+    ta, tb = _top_cause(a), _top_cause(b)
+    if ta is not None and tb is not None and ta.system != tb.system:
+        out.append(
+            StructuredDisagreement(
+                kind=StructuredDisagreementKind.TOP_CAUSE,
+                summary=(
+                    f"Top cause differs: {ta.system.value} vs {tb.system.value}"
+                ),
+                detail_a=f"{ta.name} ({ta.system.value})",
+                detail_b=f"{tb.name} ({tb.system.value})",
+                sort_key=_SORT_TOP_CAUSE,
+            )
+        )
+    sa = {c.system: c for c in sorted(a.possible_causes, key=lambda c: c.rank)}
+    sb = {c.system: c for c in sorted(b.possible_causes, key=lambda c: c.rank)}
+    for system in CauseSystem:
+        x, y = sa.get(system), sb.get(system)
+        if (x is None) == (y is None):
+            continue
+        who = "A" if x is not None else "B"
+        out.append(
+            StructuredDisagreement(
+                kind=StructuredDisagreementKind.ONE_SIDED_CAUSE,
+                summary=f"{system.value} cause raised only by {who}",
+                detail_a=(
+                    f"{x.name} (rank {x.rank})" if x is not None else "Was not raised"
+                ),
+                detail_b=(
+                    f"{y.name} (rank {y.rank})" if y is not None else "Was not raised"
+                ),
+                sort_key=_SORT_ONE_SIDED,
+            )
+        )
+
+    out.sort(key=lambda d: d.sort_key)
+    return out
