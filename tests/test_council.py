@@ -24,7 +24,7 @@ async def test_stage1_returns_one_entry_per_configured_model_all_ok():
     responses = {model: _fake_response(f"answer from {model}") for model in COUNCIL_MODELS}
     with patch.object(
         council, "query_models_parallel", new=AsyncMock(return_value=responses)
-    ):
+    ), patch.object(council, "query_model", new=AsyncMock(return_value=None)):
         results = await council.stage1_collect_responses("a question")
 
     assert len(results) == len(COUNCIL_MODELS)
@@ -39,7 +39,7 @@ async def test_stage1_keeps_failed_model_as_explicit_failed_entry():
 
     with patch.object(
         council, "query_models_parallel", new=AsyncMock(return_value=responses)
-    ):
+    ), patch.object(council, "query_model", new=AsyncMock(return_value=None)):
         results = await council.stage1_collect_responses("a question")
 
     assert len(results) == len(COUNCIL_MODELS)
@@ -52,11 +52,107 @@ async def test_stage1_all_models_fail_returns_all_failed_not_empty():
     responses = {model: None for model in COUNCIL_MODELS}
     with patch.object(
         council, "query_models_parallel", new=AsyncMock(return_value=responses)
-    ):
+    ), patch.object(council, "query_model", new=AsyncMock(return_value=None)):
         results = await council.stage1_collect_responses("a question")
 
     assert len(results) == len(COUNCIL_MODELS)
     assert all(r["status"] == "failed" for r in results)
+
+
+_BLOCK_JSON = json.dumps({
+    "possible_causes": [
+        {"name": "viral URI", "system": "respiratory", "rank": 1, "confidence": "high"}
+    ],
+    "interaction_flags": [],
+    "medication_changes": [],
+    "urgency": {"level": "routine", "escalate_if": []},
+})
+_BLOCK = f"<structured>{_BLOCK_JSON}</structured>"
+
+
+async def test_stage1_strips_block_from_response_and_parses_it():
+    responses = {
+        m: _fake_response(f"free text {m}\n{_BLOCK}") for m in COUNCIL_MODELS
+    }
+    follow = AsyncMock()
+    with patch.object(
+        council, "query_models_parallel", new=AsyncMock(return_value=responses)
+    ), patch.object(council, "query_model", new=follow):
+        results = await council.stage1_collect_responses("a question")
+
+    for r in results:
+        assert r["status"] == "ok"
+        assert r["response"] == f"free text {r['model']}"
+        assert r["structured"] is not None
+        assert r["structured"].possible_causes[0].name == "viral URI"
+    follow.assert_not_called()
+
+
+async def test_stage1_sends_instruction_in_user_message():
+    responses = {m: _fake_response(f"a\n{_BLOCK}") for m in COUNCIL_MODELS}
+    mock_parallel = AsyncMock(return_value=responses)
+    with patch.object(council, "query_models_parallel", new=mock_parallel):
+        await council.stage1_collect_responses("a question")
+
+    messages = mock_parallel.call_args[0][1]
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"].startswith("a question")
+    assert council.STRUCTURED_BLOCK_INSTRUCTION in messages[0]["content"]
+
+
+async def test_stage1_repairs_missing_block_with_one_followup_call():
+    repaired = COUNCIL_MODELS[0]
+    responses = {m: _fake_response(f"a\n{_BLOCK}") for m in COUNCIL_MODELS}
+    responses[repaired] = _fake_response("answer without block")
+    follow = AsyncMock(return_value=_fake_response(_BLOCK))
+    with patch.object(
+        council, "query_models_parallel", new=AsyncMock(return_value=responses)
+    ), patch.object(council, "query_model", new=follow):
+        results = await council.stage1_collect_responses("a question")
+
+    assert follow.await_count == 1
+    assert follow.call_args[0][0] == repaired
+    by_model = {r["model"]: r for r in results}
+    assert by_model[repaired]["structured"] is not None
+    assert by_model[repaired]["response"] == "answer without block"
+
+
+async def test_stage1_followup_failure_leaves_structured_none_and_run_continues():
+    responses = {m: _fake_response("answer without block") for m in COUNCIL_MODELS}
+    follow = AsyncMock(return_value=None)
+    with patch.object(
+        council, "query_models_parallel", new=AsyncMock(return_value=responses)
+    ), patch.object(council, "query_model", new=follow):
+        results = await council.stage1_collect_responses("a question")
+
+    assert len(results) == len(COUNCIL_MODELS)
+    assert all(r["status"] == "ok" and r["structured"] is None for r in results)
+
+    follow_bad = AsyncMock(return_value=_fake_response("still no block"))
+    with patch.object(
+        council, "query_models_parallel", new=AsyncMock(return_value=responses)
+    ), patch.object(council, "query_model", new=follow_bad):
+        results = await council.stage1_collect_responses("a question")
+    assert all(r["structured"] is None for r in results)
+
+
+async def test_stage1_failed_model_still_listed_with_structured_none():
+    failing = COUNCIL_MODELS[0]
+    responses = {m: _fake_response(f"a\n{_BLOCK}") for m in COUNCIL_MODELS}
+    responses[failing] = None
+    follow = AsyncMock()
+    with patch.object(
+        council, "query_models_parallel", new=AsyncMock(return_value=responses)
+    ), patch.object(council, "query_model", new=follow):
+        results = await council.stage1_collect_responses("a question")
+
+    by_model = {r["model"]: r for r in results}
+    assert len(results) == len(COUNCIL_MODELS)
+    assert by_model[failing] == {
+        "model": failing, "status": "failed", "response": None, "structured": None,
+    }
+    follow.assert_not_called()
 
 
 def test_build_ranked_diff_items_merges_and_ranks_by_actionability():

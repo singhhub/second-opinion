@@ -1,11 +1,17 @@
 """Stage 1 response collection + claim-diff chairman synthesis."""
 
+import asyncio
 import json
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, ValidationError
 from . import llm_client
 from .llm_client import query_models_parallel, query_model
 from .config import COUNCIL_MODELS, CHAIRMAN_MODEL
+from .structured_diff import (
+    STRUCTURED_BLOCK_INSTRUCTION,
+    StructuredAssessment,
+    split_structured_block,
+)
 from .claim_diff import Claim, ClaimPair, ClaimState, categorize_claim
 
 
@@ -40,6 +46,32 @@ CHAIRMAN_NEVER_EMERGENCY_RULE = (
 )
 
 
+async def request_structured_block(
+    model: str, question: str, answer: str
+) -> Optional[StructuredAssessment]:
+    """One follow-up call asking a model for only its structured block.
+
+    Returns None on any failure (failed call, missing or malformed block);
+    never raises, so a repair failure never blocks the run.
+    """
+    try:
+        prompt = (
+            f"Original question:\n{question}\n\n"
+            f"Your earlier answer:\n{answer}\n\n"
+            "You did not include the machine-readable summary. Reply with "
+            "ONLY the <structured>...</structured> block for your answer "
+            "above, and nothing else."
+            f"{STRUCTURED_BLOCK_INSTRUCTION}"
+        )
+        response = await query_model(model, [{"role": "user", "content": prompt}])
+        if response is None:
+            return None
+        _, block = split_structured_block(response.get("content", "") or "")
+        return block
+    except Exception:
+        return None
+
+
 async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
     """
     Stage 1: Collect individual responses from all council models.
@@ -50,14 +82,22 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
     safety rule: the old `if response is not None` filter is the exact
     error-path-to-false-unanimity that rule exists to prevent).
 
+    Each model is also asked, in the same call, for a machine-readable
+    structured block. A successful model whose block is missing or
+    malformed gets one follow-up repair call; if that fails too,
+    'structured' stays None (never read as agreement).
+
     Args:
         user_query: The user's question
 
     Returns:
-        List of dicts with 'model', 'status' ('ok'/'failed'), and
-        'response' (None if failed) keys.
+        List of dicts with 'model', 'status' ('ok'/'failed'), 'response'
+        (free text with the block removed; None if failed) and
+        'structured' (StructuredAssessment or None) keys.
     """
-    messages = [{"role": "user", "content": user_query}]
+    messages = [
+        {"role": "user", "content": user_query + "\n\n" + STRUCTURED_BLOCK_INSTRUCTION}
+    ]
 
     # Query all models in parallel
     responses = await query_models_parallel(COUNCIL_MODELS, messages)
@@ -67,17 +107,35 @@ async def stage1_collect_responses(user_query: str) -> List[Dict[str, Any]]:
     for model in COUNCIL_MODELS:
         response = responses.get(model)
         if response is not None:
+            free_text, structured = split_structured_block(
+                response.get('content', '') or ''
+            )
             stage1_results.append({
                 "model": model,
                 "status": "ok",
-                "response": response.get('content', '')
+                "response": free_text,
+                "structured": structured,
             })
         else:
             stage1_results.append({
                 "model": model,
                 "status": "failed",
-                "response": None
+                "response": None,
+                "structured": None,
             })
+
+    # One repair attempt per ok model that produced no usable block
+    to_repair = [
+        r for r in stage1_results
+        if r["status"] == "ok" and r["structured"] is None
+    ]
+    if to_repair:
+        repaired = await asyncio.gather(*[
+            request_structured_block(r["model"], user_query, r["response"])
+            for r in to_repair
+        ])
+        for entry, block in zip(to_repair, repaired):
+            entry["structured"] = block
 
     return stage1_results
 
