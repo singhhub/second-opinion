@@ -15,3 +15,11 @@ CHAIRMAN_MODEL = "gemini/gemini-3.1-pro-preview"
 # diffs) - distinct from a future human reviewer's actor id so the audit
 # log can always tell the two apart. See the design doc's Scope section.
 AUTO_APPLY_ACTOR_ID = "system-auto"
+
+# Challenge round (see docs/superpowers/specs/2026-11-07-challenge-round-design.md)
+CHALLENGE_MAX_ROUNDS = 1
+CHALLENGE_MAX_ROUNDS_HARD_CAP = 2
+CHALLENGE_MAX_ITEMS = 10
+# How many unconfirmed claims the "answers differ but nothing qualified"
+# fallback challenges.
+CHALLENGE_FALLBACK_ITEMS = 3
