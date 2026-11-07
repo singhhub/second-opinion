@@ -37,6 +37,16 @@ it should not sit."
 **What:** Pass the retrieved patient-record text as `record_context` to
 `run_challenge_round` (currently `None` in `main.py` and `eval_harness.py`).
 
+**BLOCKING - do these first, before `record_context` is wired from the wiki
+query path:**
+1. Harden `evidence_in_record`: today it accepts any substring, so a one-word
+   quote (e.g. "the") defeats the capitulation guard. Require a minimum quote
+   length / word count and match on word boundaries.
+2. Delimit position and record text in the challenge prompts as data blocks
+   (`challenge._build_prompt`): each model's text flows into the other
+   model's prompt verbatim, and the prompt-injection exposure grows once wiki
+   text is included.
+
 **Why:** The strict verbatim-evidence rule (`evidence_in_record`, the sticky
 `changed_without_evidence` guard) only activates when `record_context` is
 supplied, so today a model changing position is never checked against a record.
@@ -53,16 +63,13 @@ supplied, so today a model changing position is never checked against a record.
 **What:** Minor items deferred during the challenge-round build; the ones that
 touch safety behavior:
 - `evidence_in_record` accepts any short substring, so a one-word quote defeats
-  the guard (needs a decision on minimum quote length / word boundary).
+  the guard - now a BLOCKING item under "Wire `record_context`" above.
 - The error paths in `challenge.py` reset the sticky guard flag; safe only
   because the hard cap is 2 rounds.
-- An unclosed `<structured>` fragment is left in the free text and would reach
-  claim extraction.
 - Fallback item selection takes unconfirmed claims from A then B, so A can
   crowd out B (false-negative risk); conflicting pairs are categorized from
   claim A only.
 - A `compare_structured` failure in `main.py` is silent (no log or error field).
-- The chairman's challenge section omits a per-entry urgency tag.
 - Result page: dark mode and urgent badge contrast unverified, chip label wraps
   at 375px, "No structured disagreements found." can read as verified.
 
